@@ -39,6 +39,9 @@ export const ipcChannels = {
   startRemoteMcp: 'lnwjud:start-remote-mcp',
   stopRemoteMcp: 'lnwjud:stop-remote-mcp',
   regenerateRemoteMcpPairingCode: 'lnwjud:regenerate-remote-mcp-pairing-code',
+  beginCompanionPairing: 'lnwjud:begin-companion-pairing',
+  listCompanionDevices: 'lnwjud:list-companion-devices',
+  revokeCompanionDevice: 'lnwjud:revoke-companion-device',
   setTunnelClientPath: 'lnwjud:set-tunnel-client-path',
   setLocale: 'lnwjud:set-locale',
   setUserSettings: 'lnwjud:set-user-settings',
@@ -477,6 +480,38 @@ export interface RemoteMcpStatus {
 
 export interface SaveRemoteMcpAuthtokenRequest {
   readonly authtoken: string;
+}
+
+export interface CompanionPairingQrPayload {
+  readonly schemaVersion: 1;
+  readonly kind: 'lnwjud-companion-pairing';
+  readonly hostId: string;
+  readonly publicOrigin: string;
+  readonly pairingTicket: string;
+  readonly expiresAt: string;
+}
+
+export interface CompanionPairingResult {
+  readonly qr: CompanionPairingQrPayload;
+  readonly pairingCode: string;
+}
+
+export interface CompanionDeviceSummary {
+  readonly deviceId: string;
+  readonly deviceName: string;
+  readonly platform: 'ios' | 'android';
+  readonly pairedAt: string;
+  readonly lastSeenAt: string | null;
+  readonly revokedAt: string | null;
+}
+
+export interface RevokeCompanionDeviceRequest {
+  readonly deviceId: string;
+}
+
+export interface RevokeCompanionDeviceResult {
+  readonly revoked: boolean;
+  readonly devices: readonly CompanionDeviceSummary[];
 }
 
 export interface TunnelStatus {
@@ -989,6 +1024,9 @@ export interface IpcRequestMap {
   readonly [ipcChannels.startRemoteMcp]: undefined;
   readonly [ipcChannels.stopRemoteMcp]: undefined;
   readonly [ipcChannels.regenerateRemoteMcpPairingCode]: undefined;
+  readonly [ipcChannels.beginCompanionPairing]: undefined;
+  readonly [ipcChannels.listCompanionDevices]: undefined;
+  readonly [ipcChannels.revokeCompanionDevice]: RevokeCompanionDeviceRequest;
   readonly [ipcChannels.setTunnelClientPath]: SetTunnelClientPathRequest;
   readonly [ipcChannels.setLocale]: SetLocaleRequest;
   readonly [ipcChannels.setUserSettings]: SetUserSettingsRequest;
@@ -1057,6 +1095,9 @@ export interface IpcResponseMap {
   readonly [ipcChannels.startRemoteMcp]: RemoteMcpStatus;
   readonly [ipcChannels.stopRemoteMcp]: RemoteMcpStatus;
   readonly [ipcChannels.regenerateRemoteMcpPairingCode]: RemoteMcpStatus;
+  readonly [ipcChannels.beginCompanionPairing]: CompanionPairingResult;
+  readonly [ipcChannels.listCompanionDevices]: readonly CompanionDeviceSummary[];
+  readonly [ipcChannels.revokeCompanionDevice]: RevokeCompanionDeviceResult;
   readonly [ipcChannels.setTunnelClientPath]: { readonly clientPath: string };
   readonly [ipcChannels.setLocale]: { readonly locale: UiLocale };
   readonly [ipcChannels.setUserSettings]: { readonly settings: UserSettings; readonly restartRequired: boolean };
@@ -1127,6 +1168,9 @@ export interface LnwjudApi {
   startRemoteMcp(): Promise<IpcResponseMap[typeof ipcChannels.startRemoteMcp]>;
   stopRemoteMcp(): Promise<IpcResponseMap[typeof ipcChannels.stopRemoteMcp]>;
   regenerateRemoteMcpPairingCode(): Promise<IpcResponseMap[typeof ipcChannels.regenerateRemoteMcpPairingCode]>;
+  beginCompanionPairing(): Promise<IpcResponseMap[typeof ipcChannels.beginCompanionPairing]>;
+  listCompanionDevices(): Promise<IpcResponseMap[typeof ipcChannels.listCompanionDevices]>;
+  revokeCompanionDevice(request: RevokeCompanionDeviceRequest): Promise<IpcResponseMap[typeof ipcChannels.revokeCompanionDevice]>;
   setTunnelClientPath(request: SetTunnelClientPathRequest): Promise<IpcResponseMap[typeof ipcChannels.setTunnelClientPath]>;
   setLocale(request: SetLocaleRequest): Promise<IpcResponseMap[typeof ipcChannels.setLocale]>;
   setUserSettings(request: SetUserSettingsRequest): Promise<IpcResponseMap[typeof ipcChannels.setUserSettings]>;

@@ -1,4 +1,6 @@
 import { useEffect, useState, type ReactElement } from 'react';
+import QRCode from 'qrcode';
+import type { CompanionDeviceSummary, CompanionPairingResult } from '@lnwjud/ipc-contracts';
 import type { DashboardSnapshot, DestructiveDeletePolicy, ExternalSetupTarget, PdfProviderInstallResult, PermissionProfileName, PonytailModeOverride, PonytailPolicyContext, TunnelOAuthLoginStatus, TunnelStatus, UiLocale, UserSettings } from '@lnwjud/ipc-contracts';
 import { formatDateTime } from '../../date-time.js';
 import { createTranslator } from '../../i18n/index.js';
@@ -82,6 +84,11 @@ export function SettingsPage(props: SettingsPageProps): ReactElement {
   const [remoteMcpAuthtoken, setRemoteMcpAuthtoken] = useState('');
   const [remoteMcpBusy, setRemoteMcpBusy] = useState(false);
   const [remoteMcpMessage, setRemoteMcpMessage] = useState<string | null>(null);
+  const [companionPairing, setCompanionPairing] = useState<CompanionPairingResult | null>(null);
+  const [companionQrDataUrl, setCompanionQrDataUrl] = useState<string | null>(null);
+  const [companionDevices, setCompanionDevices] = useState<readonly CompanionDeviceSummary[]>([]);
+  const [companionBusy, setCompanionBusy] = useState(false);
+  const [companionMessage, setCompanionMessage] = useState<string | null>(null);
   const [oauthLogin, setOauthLogin] = useState<TunnelOAuthLoginStatus | null>(null);
   const [oauthBusy, setOauthBusy] = useState(false);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
@@ -112,6 +119,22 @@ export function SettingsPage(props: SettingsPageProps): ReactElement {
     }
     if (secureTunnelOnline) setSecureMethodOpen(true);
   }, [remoteMcpOnline, secureTunnelOnline]);
+
+  useEffect(() => {
+    if (!remoteMcpOnline) {
+      setCompanionPairing(null);
+      setCompanionQrDataUrl(null);
+      setCompanionDevices([]);
+      return undefined;
+    }
+    let cancelled = false;
+    void window.lnwjud.listCompanionDevices().then((devices) => {
+      if (!cancelled) setCompanionDevices(devices);
+    }).catch((cause: unknown) => {
+      if (!cancelled) setCompanionMessage(cause instanceof Error ? cause.message : 'Could not load Companion devices');
+    });
+    return (): void => { cancelled = true; };
+  }, [remoteMcpOnline]);
 
   useEffect(() => {
     const request = props.requestedSection;
@@ -383,6 +406,48 @@ export function SettingsPage(props: SettingsPageProps): ReactElement {
       setRemoteMcpMessage(cause instanceof Error ? cause.message : 'Remote MCP action failed');
     } finally {
       setRemoteMcpBusy(false);
+    }
+  }
+
+  async function refreshCompanionDevices(): Promise<void> {
+    const devices = await window.lnwjud.listCompanionDevices();
+    setCompanionDevices(devices);
+  }
+
+  async function beginCompanionPairing(): Promise<void> {
+    setCompanionBusy(true);
+    setCompanionMessage(null);
+    try {
+      const pairing = await window.lnwjud.beginCompanionPairing();
+      const qrDataUrl = await QRCode.toDataURL(JSON.stringify(pairing.qr), { width: 232, margin: 1, errorCorrectionLevel: 'M' });
+      setCompanionPairing(pairing);
+      setCompanionQrDataUrl(qrDataUrl);
+      await refreshCompanionDevices();
+      setCompanionMessage(props.locale === 'th' ? 'สร้าง QR สำหรับจับคู่มือถือแล้ว' : 'Mobile pairing QR is ready.');
+    } catch (cause: unknown) {
+      setCompanionMessage(cause instanceof Error ? cause.message : 'Could not start Companion pairing');
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function revokeCompanionDevice(device: CompanionDeviceSummary): Promise<void> {
+    const confirmed = window.confirm(props.locale === 'th'
+      ? `ยกเลิกความเชื่อถือ ${device.deviceName}? Token ของอุปกรณ์นี้จะใช้ต่อไม่ได้ทันที`
+      : `Revoke ${device.deviceName}? This device's tokens will stop working immediately.`);
+    if (!confirmed) return;
+    setCompanionBusy(true);
+    setCompanionMessage(null);
+    try {
+      const result = await window.lnwjud.revokeCompanionDevice({ deviceId: device.deviceId });
+      setCompanionDevices(result.devices);
+      setCompanionMessage(result.revoked
+        ? (props.locale === 'th' ? 'ยกเลิกอุปกรณ์แล้ว' : 'Device revoked.')
+        : (props.locale === 'th' ? 'อุปกรณ์นี้ถูกยกเลิกไปแล้วหรือไม่พบอุปกรณ์' : 'Device was already revoked or was not found.'));
+    } catch (cause: unknown) {
+      setCompanionMessage(cause instanceof Error ? cause.message : 'Could not revoke Companion device');
+    } finally {
+      setCompanionBusy(false);
     }
   }
 
@@ -729,6 +794,48 @@ export function SettingsPage(props: SettingsPageProps): ReactElement {
                   <p className="hint">{props.locale === 'th' ? 'ครั้งแรก: กด Start → นำ Public MCP URL ไปเพิ่มใน ChatGPT แบบ OAuth → ใส่ Pairing Code ครั้งเดียวเพื่อยืนยันว่าเป็นเครื่องของคุณ หลังจากนั้น lnwjud จะเก็บ OAuth trust/refresh grant แบบเข้ารหัสและไม่ถาม Pairing ซ้ำตอน Start หรือเปิดโปรแกรมใหม่ หากต้องการเปลี่ยนบัญชี/เชื่อมใหม่ ให้กด “เชื่อม ChatGPT ใหม่” เท่านั้น' : 'First time: Start → add the Public MCP URL in ChatGPT with OAuth → enter the pairing code once to confirm this machine. lnwjud then stores the OAuth trust/refresh grant encrypted, so Start and later app launches do not ask for pairing again. Use “Reconnect ChatGPT” only when you deliberately want to re-authorize.'}</p>
                   {remoteMcp.message === null ? null : <div className={remoteMcp.state === 'error' ? 'alert-box-warning' : 'hint'} role="status">{remoteMcp.message}{remoteMcp.ngrokPath === null ? '' : ` · ngrok: ${remoteMcp.ngrokPath}`}</div>}
                   {remoteMcpMessage === null ? null : <div className={remoteMcp.state === 'error' || /failed|error|exit|stopped unexpectedly/i.test(remoteMcpMessage) ? 'alert-box-warning' : 'toast-success-banner'} role="status">{remoteMcpMessage}</div>}
+                </div>
+                <div className="tunnel-setup-box companion-pairing-box">
+                  <div className="settings-mini-heading">
+                    <strong>{props.locale === 'th' ? '3. จับคู่ Mobile Companion' : '3. Pair Mobile Companion'}</strong>
+                    <span>{remoteMcpOnline ? 'READY' : 'REMOTE MCP OFFLINE'}</span>
+                  </div>
+                  <p className="hint">{props.locale === 'th'
+                    ? 'มือถือใช้ API แยกจาก /mcp และไม่มีสิทธิ raw MCP, shell หรือ Full Bypass จับคู่ผ่าน QR + PIN 6 หลักครั้งเดียว แล้วเก็บ refresh credential ใน secure storage ของอุปกรณ์'
+                    : 'Mobile uses a separate API from /mcp and has no raw MCP, shell, or Full Bypass access. Pair once with QR + a 6-digit PIN; the refresh credential is then kept in device secure storage.'}</p>
+                  <div className="inline-actions">
+                    <button type="button" className="btn-save-gold" disabled={companionBusy || !remoteMcpOnline} onClick={() => { void beginCompanionPairing(); }}>
+                      {companionBusy ? (props.locale === 'th' ? 'กำลังเตรียม…' : 'Preparing…') : companionPairing === null ? (props.locale === 'th' ? 'Pair Mobile' : 'Pair mobile') : (props.locale === 'th' ? 'สร้าง QR ใหม่' : 'Generate new QR')}
+                    </button>
+                    <button type="button" disabled={companionBusy || !remoteMcpOnline} onClick={() => { void refreshCompanionDevices().catch((cause: unknown) => setCompanionMessage(cause instanceof Error ? cause.message : 'Could not refresh devices')); }}>
+                      {props.locale === 'th' ? 'รีเฟรชอุปกรณ์' : 'Refresh devices'}
+                    </button>
+                  </div>
+                  {companionPairing === null || companionQrDataUrl === null ? null : (
+                    <div className="companion-pairing-layout">
+                      <img className="companion-pairing-qr" src={companionQrDataUrl} alt={props.locale === 'th' ? 'QR สำหรับจับคู่ lnwjud Mobile Companion' : 'lnwjud Mobile Companion pairing QR'} />
+                      <div className="companion-pairing-copy">
+                        <span className="settings-eyebrow">{props.locale === 'th' ? 'PIN ใช้ครั้งเดียว' : 'ONE-TIME PIN'}</span>
+                        <strong className="companion-pairing-pin">{companionPairing.pairingCode}</strong>
+                        <span>{props.locale === 'th' ? 'สแกน QR ในแอป แล้วกรอก PIN นี้บนมือถือ' : 'Scan the QR in the app, then enter this PIN on the phone.'}</span>
+                        <span className="hint">{props.locale === 'th' ? 'หมดอายุ' : 'Expires'} {formatDateTime(companionPairing.qr.expiresAt, '—', props.locale)}</span>
+                      </div>
+                    </div>
+                  )}
+                  <div className="companion-device-list">
+                    <div className="settings-mini-heading"><strong>{props.locale === 'th' ? 'อุปกรณ์ที่เชื่อถือ' : 'Trusted devices'}</strong><span>{companionDevices.filter((device) => device.revokedAt === null).length} ACTIVE</span></div>
+                    {companionDevices.length === 0 ? <p className="hint">{props.locale === 'th' ? 'ยังไม่มีมือถือที่จับคู่' : 'No paired mobile devices yet.'}</p> : companionDevices.map((device) => (
+                      <div className={`companion-device-row ${device.revokedAt === null ? '' : 'is-revoked'}`} key={device.deviceId}>
+                        <div>
+                          <strong>{device.deviceName}</strong>
+                          <span>{device.platform.toUpperCase()} · {props.locale === 'th' ? 'จับคู่' : 'paired'} {formatDateTime(device.pairedAt, '—', props.locale)}</span>
+                          <span>{device.lastSeenAt === null ? (props.locale === 'th' ? 'ยังไม่เคยใช้งาน' : 'Not seen yet') : `${props.locale === 'th' ? 'ล่าสุด' : 'last seen'} ${formatDateTime(device.lastSeenAt, '—', props.locale)}`}</span>
+                        </div>
+                        {device.revokedAt === null ? <button type="button" disabled={companionBusy} onClick={() => { void revokeCompanionDevice(device); }}>{props.locale === 'th' ? 'ยกเลิก' : 'Revoke'}</button> : <span className="companion-device-revoked">REVOKED</span>}
+                      </div>
+                    ))}
+                  </div>
+                  {companionMessage === null ? null : <div className={/failed|error|could not/i.test(companionMessage) ? 'alert-box-warning' : 'toast-success-banner'} role="status">{companionMessage}</div>}
                 </div>
               </section>
 

@@ -5,7 +5,7 @@ import { open, readFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import runtimeDependencies from './runtime-dependencies.json' with { type: 'json' };
-import type { CompanionHostStatus, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
+import type { CompanionDevice, CompanionHostStatus, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
 import {
   AgentSwarmService,
   CheckpointService,
@@ -141,6 +141,7 @@ import {
   type SetWorkspacePonytailModeRequest,
   type ProcessSummary,
   type RemoteMcpStatus,
+  type CompanionDeviceSummary,
   type RestoreCheckpointRequest,
   type RestoreRecoveryItemRequest,
   type SaveTunnelApiKeyRequest,
@@ -635,7 +636,16 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     active: activeIds.has(workspace.id),
     archived: false,
   });
+  const companionDeviceSummary = (device: CompanionDevice): CompanionDeviceSummary => ({
+    deviceId: device.deviceId,
+    deviceName: device.deviceName,
+    platform: device.platform,
+    pairedAt: device.pairedAt,
+    lastSeenAt: device.lastSeenAt,
+    revokedAt: device.revokedAt,
+  });
   const remoteMcpController = new RemoteMcpController({
+
     dataPath,
     getLocalMcpUrl: async (): Promise<string | null> => mcpLifecycle.status().url,
     ensureLocalMcpUrl: async (): Promise<string | null> => (await mcpLifecycle.start()).url,
@@ -1382,6 +1392,16 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     startRemoteMcp: async () => { const status = await remoteMcpController.start(); logHub.feed('mcp', 'info', `[REMOTE MCP] online ${status.publicMcpUrl ?? ''}`.trim()); return status; },
     stopRemoteMcp: async () => { const status = await remoteMcpController.stop(); logHub.feed('mcp', 'info', '[REMOTE MCP] stopped'); return status; },
     regenerateRemoteMcpPairingCode: async () => { const status = await remoteMcpController.regeneratePairingCode(); logHub.feed('mcp', 'info', '[REMOTE MCP] OAuth pairing code regenerated'); return status; },
+    beginCompanionPairing: async () => remoteMcpController.beginCompanionPairing(),
+    listCompanionDevices: async (): Promise<readonly CompanionDeviceSummary[]> => (
+      (await remoteMcpController.listCompanionDevices()).map(companionDeviceSummary)
+    ),
+    revokeCompanionDevice: async (request): Promise<{ readonly revoked: boolean; readonly devices: readonly CompanionDeviceSummary[] }> => {
+      const revoked = await remoteMcpController.revokeCompanionDevice(request.deviceId);
+      const devices = (await remoteMcpController.listCompanionDevices()).map(companionDeviceSummary);
+      if (revoked) logHub.feed('mcp', 'info', `[COMPANION] revoked mobile device ${request.deviceId}`);
+      return { revoked, devices };
+    },
     setTunnelClientPath: async (request: SetTunnelClientPathRequest): Promise<{ readonly clientPath: string }> => {
       const clientPath = await tunnelController.replaceClientPath(request.clientPath);
       if (readSettings().tunnelAutoReconnect) {

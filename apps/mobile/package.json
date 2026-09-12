@@ -1,0 +1,31 @@
+{
+  "name": "@lnwjud/mobile",
+  "version": "4.61.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lnwjud/companion-contracts": "workspace:*",
+    "@pagopa/io-react-native-crypto": "^1.2.4",
+    "expo": "~57.0.22",
+    "expo-camera": "~57.0.5",
+    "expo-crypto": "~57.0.3",
+    "expo-dev-client": "~57.0.19",
+    "expo-device": "~57.0.2",
+    "expo-secure-store": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3",
+    "vitest": "3.2.4"
+  }
+}

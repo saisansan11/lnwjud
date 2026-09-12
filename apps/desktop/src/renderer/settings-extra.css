@@ -500,6 +500,82 @@
   text-shadow: 0 0 14px rgba(74, 222, 128, .18);
 }
 
+.companion-pairing-layout {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--settings-soft-border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .025);
+}
+
+.companion-pairing-qr {
+  width: 180px;
+  height: 180px;
+  flex: 0 0 180px;
+  border-radius: 12px;
+  background: #fff;
+  padding: 8px;
+}
+
+.companion-pairing-copy {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.companion-pairing-pin {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .15em;
+}
+
+.companion-device-list {
+  display: grid;
+  gap: 8px;
+}
+
+.companion-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--settings-soft-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .02);
+}
+
+.companion-device-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.companion-device-row > div > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.companion-device-row.is-revoked {
+  opacity: .62;
+}
+
+.companion-device-revoked {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+@media (max-width: 760px) {
+  .companion-pairing-layout {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .settings-save-bar {
   position: sticky;
   bottom: 10px;
