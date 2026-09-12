@@ -28,6 +28,7 @@
     "@lnwjud/audit": "workspace:*",
     "@lnwjud/capabilities": "workspace:*",
     "@lnwjud/codex": "workspace:*",
+    "@lnwjud/companion-contracts": "workspace:*",
     "@lnwjud/domain": "workspace:*",
     "@lnwjud/extensions": "workspace:*",
     "@lnwjud/ipc-contracts": "workspace:*",

@@ -25,7 +25,7 @@ export class SecretEnvelopeError extends Error {
   }
 }
 
-export type SecretPurpose = 'checkpoint_master_key' | 'tunnel_api_key';
+export type SecretPurpose = 'checkpoint_master_key' | 'tunnel_api_key' | 'companion_state';
 
 export interface SecretProtectionStatus {
   readonly available: boolean;
@@ -125,7 +125,7 @@ export function createExplicitKeySecretProtector(key: Uint8Array): SecretProtect
 }
 
 function assertPurpose(purpose: SecretPurpose): void {
-  if (purpose !== 'checkpoint_master_key' && purpose !== 'tunnel_api_key') throw new Error('Secret purpose is unsupported');
+  if (purpose !== 'checkpoint_master_key' && purpose !== 'tunnel_api_key' && purpose !== 'companion_state') throw new Error('Secret purpose is unsupported');
 }
 
 function decodeBase64(value: string, message: string): Buffer {
@@ -143,6 +143,6 @@ function isSecretEnvelopeBody(value: unknown): value is SecretEnvelopeBody {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const body = value as Record<string, unknown>;
   return body.v === 1
-    && (body.purpose === 'checkpoint_master_key' || body.purpose === 'tunnel_api_key')
+    && (body.purpose === 'checkpoint_master_key' || body.purpose === 'tunnel_api_key' || body.purpose === 'companion_state')
     && typeof body.payload === 'string';
 }
