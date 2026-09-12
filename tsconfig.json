@@ -19,6 +19,7 @@
     { "path": "./packages/application" },
     { "path": "./packages/mcp-server" },
     { "path": "./packages/ipc-contracts" },
+    { "path": "./packages/companion-contracts" },
     { "path": "./packages/search" }
   ]
 }

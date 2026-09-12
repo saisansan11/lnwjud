@@ -237,6 +237,8 @@ importers:
         specifier: workspace:*
         version: link:../process
 
+  packages/companion-contracts: {}
+
   packages/domain: {}
 
   packages/extensions:
