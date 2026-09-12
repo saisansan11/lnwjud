@@ -1,4 +1,12 @@
-import type { CompanionHostStatus, CompanionPairingQr, CompanionPublicKeyJwk, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
+import type {
+  CompanionHostStatus,
+  CompanionPairingQr,
+  CompanionPublicKeyJwk,
+  CompanionTaskKind,
+  CompanionTaskState,
+  CompanionTaskSummary,
+  CompanionWorkspaceSummary,
+} from '@lnwjud/companion-contracts';
 import { parseTokenResponse, type CompanionTokenResponse } from './protocol';
 
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -50,6 +58,31 @@ export async function listWorkspaces(publicOrigin: string, accessToken: string):
   const record = requireRecord(value, 'workspace response');
   if (!Array.isArray(record.workspaces)) throw new Error('Workspace response is invalid.');
   return record.workspaces.map(parseWorkspace);
+}
+
+export async function listTasks(publicOrigin: string, accessToken: string): Promise<readonly CompanionTaskSummary[]> {
+  const value = await requestJson(`${publicOrigin}/companion/v1/tasks`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const record = requireRecord(value, 'task response');
+  if (!Array.isArray(record.tasks)) throw new Error('Task response is invalid.');
+  return record.tasks.map(parseTask);
+}
+
+export async function getTask(publicOrigin: string, accessToken: string, taskId: string): Promise<CompanionTaskSummary> {
+  const value = await requestJson(`${publicOrigin}/companion/v1/tasks/${encodeURIComponent(taskId)}`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  return parseTask(value);
+}
+
+export async function cancelTask(publicOrigin: string, accessToken: string, taskId: string, requestId: string): Promise<CompanionTaskSummary> {
+  const value = await requestJson(`${publicOrigin}/companion/v1/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId }),
+  });
+  return parseTask(value);
 }
 
 async function requestJson(url: string, init: RequestInit): Promise<unknown> {
@@ -109,6 +142,35 @@ function parseWorkspace(value: unknown): CompanionWorkspaceSummary {
   };
 }
 
+function parseTask(value: unknown): CompanionTaskSummary {
+  const record = requireRecord(value, 'task');
+  const kind = requireTaskKind(record.kind);
+  const state = requireTaskState(record.state);
+  return {
+    taskId: requireString(record.taskId, 'task.taskId'),
+    kind,
+    workspaceId: requireString(record.workspaceId, 'task.workspaceId'),
+    title: requireString(record.title, 'task.title'),
+    state,
+    startedAt: nullableString(record.startedAt, 'task.startedAt'),
+    updatedAt: requireString(record.updatedAt, 'task.updatedAt'),
+    completedAt: nullableString(record.completedAt, 'task.completedAt'),
+    progressLabel: nullableString(record.progressLabel, 'task.progressLabel'),
+    cancellable: record.cancellable === true,
+    resultSummary: nullableString(record.resultSummary, 'task.resultSummary'),
+  };
+}
+
+function requireTaskKind(value: unknown): CompanionTaskKind {
+  if (value === 'managed_task' || value === 'codex' || value === 'delegate' || value === 'durable_goal' || value === 'process') return value;
+  throw new Error('task.kind is invalid.');
+}
+
+function requireTaskState(value: unknown): CompanionTaskState {
+  if (value === 'queued' || value === 'running' || value === 'waiting_for_approval' || value === 'completed' || value === 'failed' || value === 'cancelled') return value;
+  throw new Error('task.state is invalid.');
+}
+
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} is invalid.`);
   return value as Record<string, unknown>;
@@ -117,6 +179,11 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 2048) throw new Error(`${field} is invalid.`);
   return value;
+}
+
+function nullableString(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  return requireString(value, field);
 }
 
 function requireCount(value: unknown, field: string): number {

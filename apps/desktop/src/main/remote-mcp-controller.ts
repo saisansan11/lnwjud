@@ -3,10 +3,10 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { CompanionDevice, CompanionHostStatus, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
+import type { CompanionDevice, CompanionHostStatus, CompanionTaskSummary, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
 import type { RemoteMcpStatus } from '@lnwjud/ipc-contracts';
 import type { SecretProtector } from '@lnwjud/shared';
-import { CompanionGateway, type CompanionPairingBundle } from './companion-gateway.js';
+import { CompanionGateway, type CompanionCancelTaskGatewayResult, type CompanionPairingBundle } from './companion-gateway.js';
 
 export type TokenEndpointAuthMethod = 'none' | 'client_secret_post';
 
@@ -74,6 +74,9 @@ export interface RemoteMcpControllerOptions {
   readonly secretProtector?: SecretProtector;
   readonly getCompanionHostStatus?: () => Promise<CompanionHostStatus>;
   readonly listCompanionWorkspaces?: () => Promise<readonly CompanionWorkspaceSummary[]>;
+  readonly listCompanionTasks?: () => Promise<readonly CompanionTaskSummary[]>;
+  readonly getCompanionTask?: (taskId: string) => Promise<CompanionTaskSummary | null>;
+  readonly cancelCompanionTask?: (taskId: string, requestId: string) => Promise<CompanionCancelTaskGatewayResult>;
 }
 
 const NGROK_API = 'http://127.0.0.1:4040/api/tunnels';
@@ -121,6 +124,9 @@ export class RemoteMcpController {
         dataPath: options.dataPath,
         getHostStatus: options.getCompanionHostStatus,
         listWorkspaces: options.listCompanionWorkspaces,
+        ...(options.listCompanionTasks === undefined ? {} : { listTasks: options.listCompanionTasks }),
+        ...(options.getCompanionTask === undefined ? {} : { getTask: options.getCompanionTask }),
+        ...(options.cancelCompanionTask === undefined ? {} : { cancelTask: options.cancelCompanionTask }),
         secretProtector: options.secretProtector,
         now: this.now,
       })

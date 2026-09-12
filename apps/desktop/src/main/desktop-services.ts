@@ -180,6 +180,7 @@ import { DesktopMcpLifecycle } from './mcp-lifecycle.js';
 import { WorkLogViewState } from './work-log-view-state.js';
 import { installPdfProvider, type InstalledPdfProvider } from './pdf-provider-installer.js';
 import { RemoteMcpController } from './remote-mcp-controller.js';
+import { CompanionTaskService } from './companion-task-service.js';
 import { supportedHostPlatform } from './platform-compatibility.js';
 import { CLIENT_PATH_SETTING, TunnelController } from './tunnel-controller.js';
 import { legacyTunnelSecretPath, oauthTunnelSessionPath, LegacyApiKeyCredentialProvider } from './tunnel-auth.js';
@@ -464,6 +465,20 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     requestCancellation,
   });
   const scheduledContinuationService = new ScheduledContinuationService(goalRepository, { workerLiveness: goalMutationFence });
+  const companionTaskService = new CompanionTaskService({
+    listWorkspaceIds: async (): Promise<readonly string[]> => (
+      (await workspaceService.list())
+        .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath))
+        .map((workspace) => workspace.id)
+    ),
+    goals: goalRepository,
+    taskCancellation,
+    process: processService,
+    codex: codexService,
+    shell: capabilityRuntime.shell,
+    delegates: agentSwarmService,
+  });
+
   const extensionsService: ExtensionsService = createLocalExtensionsService({
     settingsJson: settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
     settingsJsonProvider: () => settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
@@ -652,6 +667,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     getCompanionHostStatus: async (): Promise<CompanionHostStatus> => {
       const active = await resolveActiveProjectWorkspaces();
       const activeIds = new Set(active.map((workspace) => workspace.id));
+      const companionTasks = await companionTaskService.listTasks();
       return {
         hostId: getCompanionHostId(),
         hostName: hostname(),
@@ -660,7 +676,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
         arch: companionArch(),
         online: true,
         activeWorkspace: active[0] === undefined ? null : companionSummary(active[0], activeIds),
-        runningTaskCount: activityTracker.listInFlight().length,
+        runningTaskCount: companionTasks.filter((task) => task.state === 'running').length,
         pendingApprovalCount: 0,
         serverTime: new Date().toISOString(),
       };
@@ -672,6 +688,9 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
         .map((workspace) => companionSummary(workspace, activeIds));
     },
     ...(options.secretProtector === undefined ? {} : { secretProtector: options.secretProtector }),
+    listCompanionTasks: companionTaskService.listTasks.bind(companionTaskService),
+    getCompanionTask: companionTaskService.getTask.bind(companionTaskService),
+    cancelCompanionTask: companionTaskService.cancelTask.bind(companionTaskService),
   });
   const oauthLoginManager = new TunnelOAuthLoginManager({
     backend: oauthTunnelBackend,

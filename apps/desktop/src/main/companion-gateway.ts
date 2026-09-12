@@ -11,7 +11,9 @@ import {
   type CompanionHostStatus,
   type CompanionPairingQr,
   type CompanionRegisterDeviceRequest,
+  type CompanionRouteId,
   type CompanionScope,
+  type CompanionTaskSummary,
   type CompanionWorkspaceSummary,
 } from '@lnwjud/companion-contracts';
 import type { SecretProtector } from '@lnwjud/shared';
@@ -19,7 +21,7 @@ import type { SecretProtector } from '@lnwjud/shared';
 const PAIRING_TTL_MS = 5 * 60_000;
 const ACCESS_TTL_MS = 8 * 60 * 60_000;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
-const READ_ONLY_SCOPES = ['companion.status.read', 'companion.workspace.read'] as const satisfies readonly CompanionScope[];
+const BASE_SCOPES = ['companion.status.read', 'companion.workspace.read'] as const satisfies readonly CompanionScope[];
 const MAX_DEVICES = 16;
 const MAX_REFRESH_GRANTS = 16;
 
@@ -55,10 +57,18 @@ export interface CompanionPairingBundle {
   readonly pairingCode: string;
 }
 
+export interface CompanionCancelTaskGatewayResult {
+  readonly status: 'ok' | 'not_found' | 'not_cancellable';
+  readonly task?: CompanionTaskSummary;
+}
+
 export interface CompanionGatewayOptions {
   readonly dataPath: string;
   readonly getHostStatus: () => Promise<CompanionHostStatus>;
   readonly listWorkspaces: () => Promise<readonly CompanionWorkspaceSummary[]>;
+  readonly listTasks?: () => Promise<readonly CompanionTaskSummary[]>;
+  readonly getTask?: (taskId: string) => Promise<CompanionTaskSummary | null>;
+  readonly cancelTask?: (taskId: string, requestId: string) => Promise<CompanionCancelTaskGatewayResult>;
   readonly secretProtector: SecretProtector;
   readonly now?: () => number;
 }
@@ -68,6 +78,9 @@ export class CompanionGateway {
   private readonly statePath: string;
   private readonly getHostStatus: () => Promise<CompanionHostStatus>;
   private readonly listWorkspaces: () => Promise<readonly CompanionWorkspaceSummary[]>;
+  private readonly listTasks: CompanionGatewayOptions['listTasks'];
+  private readonly getTask: CompanionGatewayOptions['getTask'];
+  private readonly cancelTask: CompanionGatewayOptions['cancelTask'];
   private readonly secretProtector: SecretProtector;
   private readonly devices = new Map<string, CompanionDevice>();
   private readonly accessGrants = new Map<string, CompanionGrant>();
@@ -81,6 +94,9 @@ export class CompanionGateway {
     this.statePath = path.join(options.dataPath, 'companion', 'state.secret');
     this.getHostStatus = options.getHostStatus;
     this.listWorkspaces = options.listWorkspaces;
+    this.listTasks = options.listTasks;
+    this.getTask = options.getTask;
+    this.cancelTask = options.cancelTask;
     this.secretProtector = options.secretProtector;
   }
 
@@ -145,7 +161,7 @@ export class CompanionGateway {
       };
       this.deleteDeviceGrants(device.deviceId);
       this.devices.set(device.deviceId, device);
-      const pair = this.createTokenPair(device.deviceId, READ_ONLY_SCOPES);
+      const pair = this.createTokenPair(device.deviceId, this.issuedScopes());
       this.accessGrants.set(pair.accessGrant.tokenSha256, pair.accessGrant);
       this.refreshGrants.set(pair.refreshGrant.tokenSha256, pair.refreshGrant);
       await this.persist();
@@ -173,22 +189,59 @@ export class CompanionGateway {
     }
 
     if (request.method === 'GET' && url.pathname === `${COMPANION_API_PREFIX}/status`) {
-      const authorization = this.authorize(request, 'status.get');
-      if (!authorization.ok) {
-        companionAuthError(response, authorization.status);
-        return true;
-      }
+      if (!this.requireAuthorization(request, response, 'status.get')) return true;
       json(response, 200, await this.getHostStatus());
       return true;
     }
 
     if (request.method === 'GET' && url.pathname === `${COMPANION_API_PREFIX}/workspaces`) {
-      const authorization = this.authorize(request, 'workspaces.list');
-      if (!authorization.ok) {
-        companionAuthError(response, authorization.status);
+      if (!this.requireAuthorization(request, response, 'workspaces.list')) return true;
+      json(response, 200, { workspaces: await this.listWorkspaces() });
+      return true;
+    }
+
+    if (request.method === 'GET' && url.pathname === `${COMPANION_API_PREFIX}/tasks`) {
+      if (!this.requireAuthorization(request, response, 'tasks.list')) return true;
+      if (this.listTasks === undefined) {
+        json(response, 404, { error: 'not_found' });
         return true;
       }
-      json(response, 200, { workspaces: await this.listWorkspaces() });
+      json(response, 200, { tasks: await this.listTasks() });
+      return true;
+    }
+
+    const taskRoute = parseTaskRoute(url.pathname);
+    if (taskRoute !== null && request.method === 'GET' && taskRoute.action === 'get') {
+      if (!this.requireAuthorization(request, response, 'tasks.get')) return true;
+      if (this.getTask === undefined) {
+        json(response, 404, { error: 'not_found' });
+        return true;
+      }
+      const task = await this.getTask(taskRoute.taskId);
+      if (task === null) json(response, 404, { error: 'task_not_found' });
+      else json(response, 200, task);
+      return true;
+    }
+
+    if (taskRoute !== null && request.method === 'POST' && taskRoute.action === 'cancel') {
+      if (!this.requireAuthorization(request, response, 'tasks.cancel')) return true;
+      if (this.cancelTask === undefined) {
+        json(response, 404, { error: 'not_found' });
+        return true;
+      }
+      let requestId: string;
+      try {
+        const body = strictRecord(await readJson(request, 4 * 1024), ['requestId']);
+        requestId = boundedString(body.requestId, 'requestId', 128);
+        if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) throw new Error('requestId is invalid');
+      } catch (error) {
+        json(response, 400, { error: 'invalid_request', error_description: errorMessage(error) });
+        return true;
+      }
+      const result = await this.cancelTask(taskRoute.taskId, requestId);
+      if (result.status === 'not_found') json(response, 404, { error: 'task_not_found' });
+      else if (result.status === 'not_cancellable') json(response, 409, { error: 'task_not_cancellable', task: result.task });
+      else json(response, 200, result.task);
       return true;
     }
 
@@ -197,7 +250,14 @@ export class CompanionGateway {
     return true;
   }
 
-  private authorize(request: IncomingMessage, route: 'status.get' | 'workspaces.list'): { readonly ok: true } | { readonly ok: false; readonly status: 401 | 403 } {
+  private requireAuthorization(request: IncomingMessage, response: ServerResponse, route: CompanionRouteId): boolean {
+    const authorization = this.authorize(request, route);
+    if (authorization.ok) return true;
+    companionAuthError(response, authorization.status);
+    return false;
+  }
+
+  private authorize(request: IncomingMessage, route: CompanionRouteId): { readonly ok: true } | { readonly ok: false; readonly status: 401 | 403 } {
     const bearer = parseBearer(request.headers.authorization);
     if (bearer === null || !bearer.startsWith('lnwjud_comp_') || bearer.startsWith('lnwjud_comp_refresh_')) return { ok: false, status: 401 };
     const digest = sha256(bearer);
@@ -212,6 +272,13 @@ export class CompanionGateway {
     if (!companionScopesAllow(grant.scopes, route)) return { ok: false, status: 403 };
     this.devices.set(device.deviceId, { ...device, lastSeenAt: new Date(this.now()).toISOString() });
     return { ok: true };
+  }
+
+  private issuedScopes(): readonly CompanionScope[] {
+    const scopes: CompanionScope[] = [...BASE_SCOPES];
+    if (this.listTasks !== undefined && this.getTask !== undefined) scopes.push('companion.task.read');
+    if (this.listTasks !== undefined && this.getTask !== undefined && this.cancelTask !== undefined) scopes.push('companion.task.control');
+    return scopes;
   }
 
   private async rotateRefreshToken(value: string): Promise<{ readonly pair: CompanionTokenPair; readonly device: CompanionDevice } | null> {
@@ -327,6 +394,29 @@ function tokenResponse(response: ServerResponse, status: number, pair: Companion
   });
 }
 
+function parseTaskRoute(pathname: string): { readonly taskId: string; readonly action: 'get' | 'cancel' } | null {
+  const prefix = `${COMPANION_API_PREFIX}/tasks/`;
+  if (!pathname.startsWith(prefix)) return null;
+  const tail = pathname.slice(prefix.length);
+  const action = tail.endsWith('/cancel') ? 'cancel' as const : 'get' as const;
+  const encoded = action === 'cancel' ? tail.slice(0, -'/cancel'.length) : tail;
+  if (encoded.length === 0 || encoded.includes('/')) return null;
+  try {
+    const taskId = decodeURIComponent(encoded);
+    if (taskId.includes('/') || taskId.includes('\\') || hasControlCharacter(taskId)) return null;
+    return taskId.length > 0 && taskId.length <= 768 ? { taskId, action } : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
 function parseRegisterRequest(value: unknown): CompanionRegisterDeviceRequest {
   const record = strictRecord(value, ['pairingTicket', 'pairingCode', 'deviceId', 'deviceName', 'platform', 'publicKeyJwk']);
   const pairingTicket = boundedString(record.pairingTicket, 'pairingTicket', 128);
@@ -358,13 +448,14 @@ function normalizeState(value: unknown, now: number): CompanionPersistedState {
     }).slice(-MAX_DEVICES)
     : [];
   const deviceIds = new Set(devices.filter((device) => device.revokedAt === null).map((device) => device.deviceId));
+  const allowedScopes = new Set<CompanionScope>(['companion.status.read', 'companion.workspace.read', 'companion.task.read', 'companion.task.control']);
   const refreshGrants = Array.isArray(record.refreshGrants)
     ? record.refreshGrants.flatMap((entry): CompanionGrant[] => {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [];
       const grant = entry as Record<string, unknown>;
       if (typeof grant.tokenSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(grant.tokenSha256)) return [];
       if (typeof grant.deviceId !== 'string' || !deviceIds.has(grant.deviceId)) return [];
-      if (!Array.isArray(grant.scopes) || grant.scopes.some((scope) => scope !== 'companion.status.read' && scope !== 'companion.workspace.read')) return [];
+      if (!Array.isArray(grant.scopes) || grant.scopes.some((scope) => typeof scope !== 'string' || !allowedScopes.has(scope as CompanionScope))) return [];
       if (typeof grant.expiresAt !== 'number' || !Number.isFinite(grant.expiresAt) || grant.expiresAt <= now) return [];
       return [{ tokenSha256: grant.tokenSha256, deviceId: grant.deviceId, scopes: grant.scopes as CompanionScope[], expiresAt: grant.expiresAt }];
     }).slice(-MAX_REFRESH_GRANTS)

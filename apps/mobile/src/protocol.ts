@@ -1,4 +1,5 @@
 import {
+  isCompanionScope,
   parseCompanionPairingQr,
   type CompanionDevice,
   type CompanionPairingQr,
@@ -42,7 +43,7 @@ export function parseTokenResponse(value: unknown): CompanionTokenResponse {
   if (typeof expiresInSeconds !== 'number' || !Number.isSafeInteger(expiresInSeconds) || expiresInSeconds <= 0) throw new Error('Invalid token expiry.');
   if (!Array.isArray(record.scopes) || record.scopes.length === 0) throw new Error('Companion scopes are missing.');
   const scopes = record.scopes.map((scope): CompanionScope => {
-    if (scope !== 'companion.status.read' && scope !== 'companion.workspace.read') throw new Error('Unexpected Companion scope.');
+    if (!isCompanionScope(scope)) throw new Error('Unexpected Companion scope.');
     return scope;
   });
   if (!scopes.includes('companion.status.read') || !scopes.includes('companion.workspace.read')) throw new Error('Required read scopes are missing.');
