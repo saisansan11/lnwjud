@@ -1,9 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { open, readFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import path from 'node:path';
 import runtimeDependencies from './runtime-dependencies.json' with { type: 'json' };
+import type { CompanionHostStatus, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
 import {
   AgentSwarmService,
   CheckpointService,
@@ -198,6 +200,7 @@ const tunnelIdentitySettingKey = 'tunnel_identity_id';
 const tunnelAuthModeSettingKey = 'tunnel_auth_mode';
 const tunnelRuntimeDesiredStateSettingKey = 'tunnel_runtime_desired_state';
 const tunnelRuntimeOwnerPathSettingKey = 'tunnel_runtime_owner_path';
+const companionHostIdSettingKey = 'companion_host_id';
 
 export interface DesktopRuntime {
   readonly services: DesktopIpcServices;
@@ -615,10 +618,49 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     getRuntimeOwnerPath: (): string | null => settingsRepository.get(tunnelRuntimeOwnerPathSettingKey),
     setRuntimeOwnerPath: (value: string): void => { settingsRepository.set(tunnelRuntimeOwnerPathSettingKey, value.trim()); },
   });
+  const getCompanionHostId = (): string => {
+    const existing = settingsRepository.get(companionHostIdSettingKey)?.trim();
+    if (existing !== undefined && existing.length > 0) return existing;
+    const created = randomUUID();
+    settingsRepository.set(companionHostIdSettingKey, created);
+    return created;
+  };
+  const companionArch = (): 'x64' | 'arm64' => {
+    if (process.arch === 'x64' || process.arch === 'arm64') return process.arch;
+    throw new Error(`Unsupported Companion host architecture: ${process.arch}`);
+  };
+  const companionSummary = (workspace: Workspace, activeIds: ReadonlySet<string>): CompanionWorkspaceSummary => ({
+    id: workspace.id,
+    displayName: workspace.displayName,
+    active: activeIds.has(workspace.id),
+    archived: false,
+  });
   const remoteMcpController = new RemoteMcpController({
     dataPath,
     getLocalMcpUrl: async (): Promise<string | null> => mcpLifecycle.status().url,
     ensureLocalMcpUrl: async (): Promise<string | null> => (await mcpLifecycle.start()).url,
+    getCompanionHostStatus: async (): Promise<CompanionHostStatus> => {
+      const active = await resolveActiveProjectWorkspaces();
+      const activeIds = new Set(active.map((workspace) => workspace.id));
+      return {
+        hostId: getCompanionHostId(),
+        hostName: hostname(),
+        appVersion: APP_VERSION,
+        platform: supportedHostPlatform(process.platform),
+        arch: companionArch(),
+        online: true,
+        activeWorkspace: active[0] === undefined ? null : companionSummary(active[0], activeIds),
+        runningTaskCount: activityTracker.listInFlight().length,
+        pendingApprovalCount: 0,
+        serverTime: new Date().toISOString(),
+      };
+    },
+    listCompanionWorkspaces: async (): Promise<readonly CompanionWorkspaceSummary[]> => {
+      const activeIds = new Set((await resolveActiveProjectWorkspaces()).map((workspace) => workspace.id));
+      return (await workspaceService.list())
+        .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath))
+        .map((workspace) => companionSummary(workspace, activeIds));
+    },
     ...(options.secretProtector === undefined ? {} : { secretProtector: options.secretProtector }),
   });
   const oauthLoginManager = new TunnelOAuthLoginManager({

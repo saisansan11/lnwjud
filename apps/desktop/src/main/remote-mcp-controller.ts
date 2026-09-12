@@ -3,8 +3,10 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import type { CompanionDevice, CompanionHostStatus, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
 import type { RemoteMcpStatus } from '@lnwjud/ipc-contracts';
 import type { SecretProtector } from '@lnwjud/shared';
+import { CompanionGateway, type CompanionPairingBundle } from './companion-gateway.js';
 
 export type TokenEndpointAuthMethod = 'none' | 'client_secret_post';
 
@@ -70,6 +72,8 @@ export interface RemoteMcpControllerOptions {
   readonly now?: () => number;
   readonly persistence?: RemoteMcpStatePersistence;
   readonly secretProtector?: SecretProtector;
+  readonly getCompanionHostStatus?: () => Promise<CompanionHostStatus>;
+  readonly listCompanionWorkspaces?: () => Promise<readonly CompanionWorkspaceSummary[]>;
 }
 
 const NGROK_API = 'http://127.0.0.1:4040/api/tunnels';
@@ -85,6 +89,7 @@ export class RemoteMcpController {
   private readonly now: () => number;
   private readonly persistence: RemoteMcpStatePersistence;
   private readonly secretProtector?: SecretProtector;
+  private readonly companion: CompanionGateway | null;
   private persistenceLoaded = false;
   private persistenceLoad: Promise<void> | null = null;
   private desiredRunning = false;
@@ -111,6 +116,15 @@ export class RemoteMcpController {
     this.now = options.now ?? Date.now;
     if (options.secretProtector !== undefined) this.secretProtector = options.secretProtector;
     this.persistence = options.persistence ?? createRemoteMcpStatePersistence(options.dataPath, options.secretProtector);
+    this.companion = options.getCompanionHostStatus !== undefined && options.listCompanionWorkspaces !== undefined && options.secretProtector !== undefined
+      ? new CompanionGateway({
+        dataPath: options.dataPath,
+        getHostStatus: options.getCompanionHostStatus,
+        listWorkspaces: options.listCompanionWorkspaces,
+        secretProtector: options.secretProtector,
+        now: this.now,
+      })
+      : null;
   }
 
   public async status(): Promise<RemoteMcpStatus> {
@@ -206,6 +220,21 @@ export class RemoteMcpController {
     await this.persistState();
     this.message = 'ChatGPT authorization was reset. Pair once to trust this connection again.';
     return this.status();
+  }
+
+  public async beginCompanionPairing(): Promise<CompanionPairingBundle> {
+    if (this.companion === null) throw new Error('Companion gateway is not configured');
+    return this.companion.beginPairing(this.requirePublicOrigin());
+  }
+
+  public async listCompanionDevices(): Promise<readonly CompanionDevice[]> {
+    if (this.companion === null) return [];
+    return this.companion.listDevices();
+  }
+
+  public async revokeCompanionDevice(deviceId: string): Promise<boolean> {
+    if (this.companion === null) return false;
+    return this.companion.revokeDevice(deviceId);
   }
 
   public async autoStartIfDesired(): Promise<RemoteMcpStatus> {
@@ -338,6 +367,7 @@ export class RemoteMcpController {
 
   private async handleGatewayRequest(request: IncomingMessage, response: ServerResponse, localMcpUrl: string): Promise<void> {
     const url = new URL(request.url ?? '/', this.publicOrigin ?? this.gatewayUrl ?? 'http://127.0.0.1');
+    if (this.companion !== null && await this.companion.handleRequest(request, response, url)) return;
     if (request.method === 'GET' && (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp')) {
       const origin = this.requirePublicOrigin();
       json(response, 200, { resource: `${origin}/mcp`, authorization_servers: [origin], bearer_methods_supported: ['header'] });

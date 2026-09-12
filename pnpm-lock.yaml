@@ -101,6 +101,9 @@ importers:
       '@lnwjud/codex':
         specifier: workspace:*
         version: link:../../packages/codex
+      '@lnwjud/companion-contracts':
+        specifier: workspace:*
+        version: link:../../packages/companion-contracts
       '@lnwjud/domain':
         specifier: workspace:*
         version: link:../../packages/domain

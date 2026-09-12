@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CompanionHostStatus, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
+import { createExplicitKeySecretProtector } from '@lnwjud/shared';
 import { buildNgrokHttpArgs, extractNgrokDiagnostic, formatNgrokExitMessage, posixExecutableCandidates, RemoteMcpController, resolveNgrokExecutable, selectRecoverableStaleNgrokProcess, type RemoteMcpPersistedState } from '../src/main/remote-mcp-controller.js';
 
 interface RemoteMcpTestAccess {
@@ -356,5 +358,121 @@ describe('Remote MCP OAuth gateway', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'invalid_redirect_uri' });
     await controller.close();
+  });
+});
+
+describe('Companion read-only gateway', () => {
+  it('fails closed when the host secure-storage provider is unavailable', async () => {
+    const controller = new RemoteMcpController({
+      dataPath: 'unused',
+      getLocalMcpUrl: async (): Promise<null> => null,
+      getCompanionHostStatus: async (): Promise<CompanionHostStatus> => ({ hostId: 'host', hostName: 'host', appVersion: '4.61.0', platform: 'win32', arch: 'x64', online: true, activeWorkspace: null, runningTaskCount: 0, pendingApprovalCount: 0, serverTime: new Date().toISOString() }),
+      listCompanionWorkspaces: async (): Promise<readonly CompanionWorkspaceSummary[]> => [],
+    });
+    await expect(controller.beginCompanionPairing()).rejects.toThrow(/not configured/i);
+  });
+
+  it('pairs a mobile device, isolates bearer namespaces, and revokes access immediately', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-companion-'));
+    const secretProtector = createExplicitKeySecretProtector(Buffer.alloc(32, 19));
+    let upstreamCalls = 0;
+    const upstreamOrigin = await listen(createServer((_request, response) => {
+      upstreamCalls += 1;
+      response.end('{}');
+    }));
+    const workspaces = [{ id: 'ws-1', displayName: 'Training', active: true, archived: false }] as const;
+    const hostStatus = {
+      hostId: 'host-fixture',
+      hostName: 'desktop-fixture',
+      appVersion: '4.61.0',
+      platform: 'win32' as const,
+      arch: 'x64' as const,
+      online: true,
+      activeWorkspace: workspaces[0],
+      runningTaskCount: 0,
+      pendingApprovalCount: 0,
+      serverTime: '2026-09-12T04:00:00.000Z',
+    };
+    const controller = new RemoteMcpController({
+      dataPath: root,
+      getLocalMcpUrl: async (): Promise<string> => `${upstreamOrigin}/mcp`,
+      getCompanionHostStatus: async (): Promise<CompanionHostStatus> => hostStatus,
+      listCompanionWorkspaces: async (): Promise<readonly CompanionWorkspaceSummary[]> => workspaces,
+      secretProtector,
+    });
+    const internal = controller as unknown as RemoteMcpTestAccess & {
+      accessTokens: Map<string, { clientId: string; expiresAt: number }>;
+    };
+    try {
+      await internal.startGateway(`${upstreamOrigin}/mcp`);
+      internal.publicOrigin = 'https://companion.example.test';
+      internal.runState = 'running';
+      const pairing = await controller.beginCompanionPairing();
+      const origin = internal.gatewayUrl!;
+
+      const registration = await fetch(`${origin}/companion/v1/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          pairingTicket: pairing.qr.pairingTicket,
+          pairingCode: pairing.pairingCode,
+          deviceId: 'ios-device-1',
+          deviceName: 'iPhone',
+          platform: 'ios',
+          publicKeyJwk: { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: 'B'.repeat(43), alg: 'ES256', use: 'sig', key_ops: ['verify'] },
+        }),
+      });
+      expect(registration.status).toBe(201);
+      const registered = await registration.json() as { access_token: string; scopes: string[] };
+      expect(registered.access_token).toMatch(/^lnwjud_comp_/);
+      expect(registered.scopes).toEqual(['companion.status.read', 'companion.workspace.read']);
+
+      const persisted = await readFile(path.join(root, 'companion', 'state.secret'), 'utf8');
+      expect(persisted).toMatch(/^safe:v1:/);
+      expect(persisted).not.toContain(registered.access_token);
+      expect(persisted).not.toContain('ios-device-1');
+      const decrypted = await secretProtector.decrypt('companion_state', persisted.trim());
+      expect(decrypted.plainText).toContain('ios-device-1');
+      expect(decrypted.plainText).not.toContain(registered.access_token);
+
+      const status = await fetch(`${origin}/companion/v1/status`, {
+        headers: { authorization: `Bearer ${registered.access_token}` },
+      });
+      expect(status.status).toBe(200);
+      expect(await status.json()).toEqual(hostStatus);
+
+      const workspaceResponse = await fetch(`${origin}/companion/v1/workspaces`, {
+        headers: { authorization: `Bearer ${registered.access_token}` },
+      });
+      expect(workspaceResponse.status).toBe(200);
+      expect(await workspaceResponse.json()).toEqual({ workspaces });
+
+      const queryToken = await fetch(`${origin}/companion/v1/status?token=${encodeURIComponent(registered.access_token)}`);
+      expect(queryToken.status).toBe(401);
+
+      const mobileOnMcp = await fetch(`${origin}/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${registered.access_token}` },
+        body: '{}',
+      });
+      expect(mobileOnMcp.status).toBe(401);
+      expect(upstreamCalls).toBe(0);
+
+      internal.accessTokens.set('oauth-fixture-token', { clientId: 'oauth-client', expiresAt: Date.now() + 60_000 });
+      const oauthOnCompanion = await fetch(`${origin}/companion/v1/status`, {
+        headers: { authorization: 'Bearer oauth-fixture-token' },
+      });
+      expect(oauthOnCompanion.status).toBe(401);
+
+      expect(await controller.revokeCompanionDevice('ios-device-1')).toBe(true);
+      const revoked = await fetch(`${origin}/companion/v1/status`, {
+        headers: { authorization: `Bearer ${registered.access_token}` },
+      });
+      expect(revoked.status).toBe(401);
+      expect((await controller.listCompanionDevices())[0]?.revokedAt).not.toBeNull();
+    } finally {
+      await controller.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

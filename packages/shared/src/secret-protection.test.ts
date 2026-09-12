@@ -38,8 +38,11 @@ describe('secret protection contract', () => {
   it('binds explicit development encryption to the requested purpose', async () => {
     const protector = createExplicitKeySecretProtector(Buffer.alloc(32, 7));
     const envelope = await protector.encrypt('tunnel_api_key', 'runtime-secret');
+    const companionEnvelope = await protector.encrypt('companion_state', 'trusted-device-state');
     await expect(protector.decrypt('tunnel_api_key', envelope)).resolves.toEqual({ plainText: 'runtime-secret', shouldReEncrypt: false });
     await expect(protector.decrypt('checkpoint_master_key', envelope)).rejects.toThrow(/purpose/i);
+    await expect(protector.decrypt('companion_state', companionEnvelope)).resolves.toEqual({ plainText: 'trusted-device-state', shouldReEncrypt: false });
+    await expect(protector.decrypt('tunnel_api_key', companionEnvelope)).rejects.toThrow(/purpose/i);
     await expect(protector.encrypt('tunnel_api_key', '')).rejects.toThrow(/empty/i);
   });
 
