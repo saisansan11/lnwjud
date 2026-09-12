@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Redactor } from '@lnwjud/audit';
-import { appError, err, isApplicationAuthorized, ok, type InvocationAuthorization, type Result } from '@lnwjud/domain';
+import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result } from '@lnwjud/domain';
 import type { ManagedProcess, ProcessLogResult } from '@lnwjud/process';
 import {
   SqliteAgentSwarmRepository,
@@ -31,6 +31,7 @@ export interface AgentSwarmCodexPort {
   taskStatus(actor: FileActor, workspaceId: string, codexTaskId: string): Promise<Result<ManagedProcess>>;
   taskLogs(actor: FileActor, workspaceId: string, codexTaskId: string, query: { tailLines?: number; sinceSequence?: number }): Promise<Result<ProcessLogResult>>;
   stop(actor: FileActor, workspaceId: string, codexTaskId: string, userConfirmed?: boolean, authorization?: InvocationAuthorization): Promise<Result<void>>;
+  cancelForGoal?(ownerClientId: string, workspaceId: string, codexTaskId: string): Promise<Result<GoalTaskCancellationObservation>>;
 }
 
 interface LiveSwarm {
@@ -172,6 +173,55 @@ export class AgentSwarmService {
     const items = this.repository.listOwned(actor.clientId, actorSessionId(actor), workspaceId, boundedLimit + 1, offset);
     const hasMore = items.length > boundedLimit;
     return ok({ items: items.slice(0, boundedLimit).map(toSnapshot), ...(hasMore ? { nextCursor: String(offset + boundedLimit) } : {}) });
+  }
+
+  /** Bounded Desktop-host projection. It returns no prompt/result payloads. */
+  public listForHost(limit = 50): readonly AgentSwarmSnapshot[] {
+    return this.repository.listForHost(limit).map(toSnapshot);
+  }
+
+  /** Exact Desktop-host lookup used only after an opaque Companion task reference is decoded. */
+  public getForHost(swarmId: string): AgentSwarmSnapshot | undefined {
+    const swarm = this.repository.getForHost(swarmId);
+    return swarm === undefined ? undefined : toSnapshot(swarm);
+  }
+
+  /**
+   * Desktop-host cancellation uses the persisted owner plus the still-live
+   * swarm handle. After restart active rows are already downgraded to
+   * termination_unverified, so this path never reattaches to a guessed PID.
+   */
+  public async cancelForHost(swarmId: string): Promise<Result<AgentSwarmSnapshot>> {
+    const swarm = this.repository.getForHost(swarmId);
+    if (swarm === undefined) return err(appError('PROCESS_NOT_FOUND', 'Agent swarm was not found'));
+    if (isTerminalSwarm(swarm.state)) return ok(toSnapshot(swarm));
+    const live = this.live.get(swarmId);
+    if (live === undefined) return err(appError('CONFLICT', 'Agent swarm runtime handle is unavailable; cancellation is not safe after restart'));
+    live.abortController.abort();
+    for (const task of swarm.tasks) {
+      if (task.state === 'queued' || task.state === 'blocked') {
+        this.repository.updateTask(swarmId, task.id, { state: 'cancelled', finishedAt: this.now().toISOString() }, this.now().toISOString());
+        continue;
+      }
+      if (task.state !== 'running' || task.codexTaskId === undefined) continue;
+      const stopped = this.codex.cancelForGoal === undefined
+        ? err(appError('CONFLICT', 'Codex host cancellation is unavailable'))
+        : await this.codex.cancelForGoal(swarm.ownerClientId, swarm.workspaceId, task.codexTaskId);
+      const state: StoredAgentSwarmTaskState = stopped.ok && (stopped.value.state === 'cancelled' || stopped.value.state === 'already_terminal')
+        ? 'cancelled'
+        : 'termination_unverified';
+      const error = stopped.ok ? undefined : boundedError(stopped.error.message);
+      this.repository.updateTask(swarmId, task.id, {
+        state,
+        ...(error === undefined ? {} : { error }),
+        finishedAt: this.now().toISOString(),
+      }, this.now().toISOString());
+    }
+    const refreshed = this.repository.getForHost(swarmId);
+    if (refreshed === undefined) return err(appError('PROCESS_NOT_FOUND', 'Agent swarm disappeared during cancellation'));
+    const state: StoredAgentSwarmState = refreshed.tasks.some((task) => task.state === 'termination_unverified') ? 'termination_unverified' : 'cancelled';
+    this.repository.updateSwarmState(swarmId, state, this.now().toISOString());
+    return ok(toSnapshot(this.repository.getForHost(swarmId)!));
   }
 
   private async monitor(swarmId: string, live: LiveSwarm, outerSignal?: AbortSignal): Promise<void> {

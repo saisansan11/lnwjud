@@ -100,6 +100,20 @@ export class SqliteAgentSwarmRepository {
     return rows.map((row) => this.fromRow(row));
   }
 
+  /** Desktop-host administration view. Never use this for MCP caller authorization. */
+  public getForHost(id: string): StoredAgentSwarm | undefined {
+    const row = this.database.connection.prepare('SELECT * FROM agent_swarms WHERE id = ?').get(id) as SwarmRow | undefined;
+    return row === undefined ? undefined : this.fromRow(row);
+  }
+
+  /** Bounded Desktop-host administration view. Never use this for MCP caller authorization. */
+  public listForHost(limit = 50): readonly StoredAgentSwarm[] {
+    const boundedLimit = Math.min(100, Math.max(1, Math.trunc(limit)));
+    const rows = this.database.connection.prepare('SELECT * FROM agent_swarms ORDER BY updated_at DESC, id DESC LIMIT ?')
+      .all(boundedLimit) as unknown as SwarmRow[];
+    return rows.map((row) => this.fromRow(row));
+  }
+
   public updateSwarmState(id: string, state: StoredAgentSwarmState, updatedAt: string): void {
     this.database.connection.prepare('UPDATE agent_swarms SET state = ?, updated_at = ? WHERE id = ?').run(state, updatedAt, id);
   }

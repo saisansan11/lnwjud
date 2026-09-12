@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import * as Device from 'expo-device';
+import * as Crypto from 'expo-crypto';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import {
@@ -14,19 +15,41 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import type { CompanionHostStatus, CompanionPairingQr, CompanionWorkspaceSummary } from '@lnwjud/companion-contracts';
-import { getHostStatus, listWorkspaces, refreshSession, registerDevice } from './src/api';
+import type {
+  CompanionHostStatus,
+  CompanionPairingQr,
+  CompanionTaskSummary,
+  CompanionWorkspaceSummary,
+} from '@lnwjud/companion-contracts';
+import {
+  cancelTask,
+  getHostStatus,
+  listTasks,
+  listWorkspaces,
+  refreshSession,
+  registerDevice,
+} from './src/api';
 import { ensureDevicePublicKey } from './src/device-identity';
 import { parsePairingPayload, type StoredCompanionSession } from './src/protocol';
 import { clearSession, getOrCreateDeviceId, loadSession, saveSession } from './src/secure-session';
 
 type Tab = 'home' | 'tasks' | 'approvals' | 'settings';
 
+interface DashboardData {
+  readonly host: CompanionHostStatus;
+  readonly workspaces: readonly CompanionWorkspaceSummary[];
+  readonly tasks: readonly CompanionTaskSummary[];
+  readonly tasksAvailable: boolean;
+}
+
 export default function App(): ReactElement {
   const [session, setSession] = useState<StoredCompanionSession | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [host, setHost] = useState<CompanionHostStatus | null>(null);
   const [workspaces, setWorkspaces] = useState<readonly CompanionWorkspaceSummary[]>([]);
+  const [tasks, setTasks] = useState<readonly CompanionTaskSummary[]>([]);
+  const [tasksAvailable, setTasksAvailable] = useState(true);
+  const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('home');
@@ -40,17 +63,11 @@ export default function App(): ReactElement {
         const tokens = await refreshSession(stored.publicOrigin, stored.refreshToken);
         const rotated = { ...stored, refreshToken: tokens.refreshToken };
         await saveSession(rotated);
+        const dashboard = await loadDashboard(rotated.publicOrigin, tokens.accessToken);
         if (cancelled) return;
         setSession(rotated);
         setAccessToken(tokens.accessToken);
-        const [nextHost, nextWorkspaces] = await Promise.all([
-          getHostStatus(rotated.publicOrigin, tokens.accessToken),
-          listWorkspaces(rotated.publicOrigin, tokens.accessToken),
-        ]);
-        if (!cancelled) {
-          setHost(nextHost);
-          setWorkspaces(nextWorkspaces);
-        }
+        applyDashboard(dashboard, setHost, setWorkspaces, setTasks, setTasksAvailable);
       } catch (cause: unknown) {
         await clearSession().catch(() => undefined);
         if (!cancelled) setError(messageOf(cause));
@@ -67,12 +84,8 @@ export default function App(): ReactElement {
     setError(null);
     setLoading(true);
     try {
-      const [nextHost, nextWorkspaces] = await Promise.all([
-        getHostStatus(pairedSession.publicOrigin, token),
-        listWorkspaces(pairedSession.publicOrigin, token),
-      ]);
-      setHost(nextHost);
-      setWorkspaces(nextWorkspaces);
+      const dashboard = await loadDashboard(pairedSession.publicOrigin, token);
+      applyDashboard(dashboard, setHost, setWorkspaces, setTasks, setTasksAvailable);
       setTab('home');
     } finally {
       setLoading(false);
@@ -84,40 +97,62 @@ export default function App(): ReactElement {
     setLoading(true);
     setError(null);
     try {
+      let activeSession = session;
       let token = accessToken;
       if (token === null) {
-        const refreshed = await refreshSession(session.publicOrigin, session.refreshToken);
-        const rotated = { ...session, refreshToken: refreshed.refreshToken };
-        await saveSession(rotated);
-        setSession(rotated);
+        const refreshed = await refreshSession(activeSession.publicOrigin, activeSession.refreshToken);
+        activeSession = { ...activeSession, refreshToken: refreshed.refreshToken };
+        await saveSession(activeSession);
+        setSession(activeSession);
+        setAccessToken(refreshed.accessToken);
         token = refreshed.accessToken;
-        setAccessToken(token);
       }
+      let dashboard: DashboardData;
       try {
-        const [nextHost, nextWorkspaces] = await Promise.all([
-          getHostStatus(session.publicOrigin, token),
-          listWorkspaces(session.publicOrigin, token),
-        ]);
-        setHost(nextHost);
-        setWorkspaces(nextWorkspaces);
+        dashboard = await loadDashboard(activeSession.publicOrigin, token);
       } catch (cause: unknown) {
         if (!isUnauthorized(cause)) throw cause;
-        const refreshed = await refreshSession(session.publicOrigin, session.refreshToken);
-        const rotated = { ...session, refreshToken: refreshed.refreshToken };
-        await saveSession(rotated);
-        setSession(rotated);
+        const refreshed = await refreshSession(activeSession.publicOrigin, activeSession.refreshToken);
+        activeSession = { ...activeSession, refreshToken: refreshed.refreshToken };
+        await saveSession(activeSession);
+        setSession(activeSession);
         setAccessToken(refreshed.accessToken);
-        const [nextHost, nextWorkspaces] = await Promise.all([
-          getHostStatus(rotated.publicOrigin, refreshed.accessToken),
-          listWorkspaces(rotated.publicOrigin, refreshed.accessToken),
-        ]);
-        setHost(nextHost);
-        setWorkspaces(nextWorkspaces);
+        dashboard = await loadDashboard(activeSession.publicOrigin, refreshed.accessToken);
       }
+      applyDashboard(dashboard, setHost, setWorkspaces, setTasks, setTasksAvailable);
     } catch (cause: unknown) {
       setError(messageOf(cause));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function cancelFromPhone(taskId: string): Promise<void> {
+    if (session === null || accessToken === null || cancellingTaskId !== null) return;
+    setCancellingTaskId(taskId);
+    setError(null);
+    try {
+      let activeSession = session;
+      let token = accessToken;
+      try {
+        await cancelTask(activeSession.publicOrigin, token, taskId, `cancel-${Crypto.randomUUID()}`);
+      } catch (cause: unknown) {
+        if (!isUnauthorized(cause)) throw cause;
+        const refreshed = await refreshSession(activeSession.publicOrigin, activeSession.refreshToken);
+        activeSession = { ...activeSession, refreshToken: refreshed.refreshToken };
+        await saveSession(activeSession);
+        setSession(activeSession);
+        setAccessToken(refreshed.accessToken);
+        token = refreshed.accessToken;
+        await cancelTask(activeSession.publicOrigin, token, taskId, `cancel-${Crypto.randomUUID()}`);
+      }
+      const dashboard = await loadDashboard(activeSession.publicOrigin, token);
+      applyDashboard(dashboard, setHost, setWorkspaces, setTasks, setTasksAvailable);
+    } catch (cause: unknown) {
+      if (isForbidden(cause)) setTasksAvailable(false);
+      setError(messageOf(cause));
+    } finally {
+      setCancellingTaskId(null);
     }
   }
 
@@ -127,6 +162,9 @@ export default function App(): ReactElement {
     setAccessToken(null);
     setHost(null);
     setWorkspaces([]);
+    setTasks([]);
+    setTasksAvailable(true);
+    setCancellingTaskId(null);
     setTab('home');
     setError(null);
   }
@@ -144,7 +182,14 @@ export default function App(): ReactElement {
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           {error === null ? null : <Alert text={error} />}
           {tab === 'home' ? <Home host={host} workspaces={workspaces} /> : null}
-          {tab === 'tasks' ? <Placeholder title="Tasks" detail="Durable task monitoring and cancellation arrives in M4." /> : null}
+          {tab === 'tasks' ? (
+            <TasksPage
+              tasks={tasks}
+              available={tasksAvailable}
+              cancellingTaskId={cancellingTaskId}
+              onCancel={(taskId) => { void cancelFromPhone(taskId); }}
+            />
+          ) : null}
           {tab === 'approvals' ? <Placeholder title="Approvals" detail="Device-bound exact-action approvals arrive in M5." /> : null}
           {tab === 'settings' ? <Settings session={session} host={host} onForget={() => { void forgetLocalSession(); }} /> : null}
         </ScrollView>
@@ -345,6 +390,61 @@ function Home(props: { readonly host: CompanionHostStatus | null; readonly works
   );
 }
 
+function TasksPage(props: {
+  readonly tasks: readonly CompanionTaskSummary[];
+  readonly available: boolean;
+  readonly cancellingTaskId: string | null;
+  readonly onCancel: (taskId: string) => void;
+}): ReactElement {
+  return (
+    <>
+      <Text style={styles.pageEyebrow}>DURABLE WORK</Text>
+      <Text style={styles.pageTitle}>Tasks</Text>
+      {!props.available ? (
+        <View style={styles.warningCard}>
+          <Text style={styles.warningTitle}>Pair again to enable task access</Text>
+          <Text style={styles.muted}>This phone was paired before M4 task scopes were available. lnwjud never upgrades an existing refresh token silently. Forget or revoke this device, then pair it again from Desktop.</Text>
+        </View>
+      ) : props.tasks.length === 0 ? (
+        <View style={styles.placeholderCard}>
+          <Text style={styles.placeholderGlyph}>◇</Text>
+          <Text style={styles.placeholderTitle}>No durable tasks</Text>
+          <Text style={styles.heroBody}>Owned task providers have nothing active or recently tracked for the registered workspaces.</Text>
+        </View>
+      ) : props.tasks.map((task) => (
+        <TaskCard
+          key={task.taskId}
+          task={task}
+          cancelling={props.cancellingTaskId === task.taskId}
+          onCancel={() => props.onCancel(task.taskId)}
+        />
+      ))}
+    </>
+  );
+}
+
+function TaskCard(props: { readonly task: CompanionTaskSummary; readonly cancelling: boolean; readonly onCancel: () => void }): ReactElement {
+  const task = props.task;
+  return (
+    <View style={styles.taskCard}>
+      <View style={styles.taskTopLine}>
+        <Text style={styles.taskKind}>{taskKindLabel(task.kind)}</Text>
+        <Text style={[styles.taskState, task.state === 'running' && styles.taskStateRunning]}>{taskStateLabel(task.state)}</Text>
+      </View>
+      <Text style={styles.taskTitle}>{task.title}</Text>
+      {task.progressLabel === null ? null : <Text style={styles.taskProgress}>{task.progressLabel}</Text>}
+      {task.resultSummary === null ? null : <Text style={styles.muted}>{task.resultSummary}</Text>}
+      <View style={styles.taskMetaRow}>
+        <Text style={styles.taskMeta}>Updated {formatTaskTime(task.updatedAt)}</Text>
+        <Text style={styles.taskMeta}>{shortId(task.taskId)}</Text>
+      </View>
+      {task.cancellable ? (
+        <SecondaryButton label={props.cancelling ? 'Cancelling…' : 'Cancel task'} disabled={props.cancelling} onPress={props.onCancel} />
+      ) : null}
+    </View>
+  );
+}
+
 function Settings(props: { readonly session: StoredCompanionSession; readonly host: CompanionHostStatus | null; readonly onForget: () => void }): ReactElement {
   return (
     <>
@@ -402,22 +502,76 @@ function TabBar(props: { readonly tab: Tab; readonly setTab: (tab: Tab) => void 
 function Metric(props: { readonly label: string; readonly value: string }): ReactElement {
   return <View style={styles.metric}><Text style={styles.metricValue}>{props.value}</Text><Text style={styles.metricLabel}>{props.label}</Text></View>;
 }
+
 function InfoRow(props: { readonly label: string; readonly value: string }): ReactElement {
   return <View style={styles.infoRow}><Text style={styles.infoLabel}>{props.label}</Text><Text numberOfLines={2} style={styles.infoValue}>{props.value}</Text></View>;
 }
-function Alert(props: { readonly text: string }): ReactElement { return <View style={styles.alert}><Text style={styles.alertText}>{props.text}</Text></View>; }
+
+function Alert(props: { readonly text: string }): ReactElement {
+  return <View style={styles.alert}><Text style={styles.alertText}>{props.text}</Text></View>;
+}
+
 function PrimaryButton(props: { readonly label: string; readonly onPress: () => void; readonly disabled?: boolean }): ReactElement {
   return <Pressable style={[styles.primaryButton, props.disabled === true && styles.disabled]} disabled={props.disabled} onPress={props.onPress}><Text style={styles.primaryButtonText}>{props.label}</Text></Pressable>;
 }
+
 function SecondaryButton(props: { readonly label: string; readonly onPress: () => void; readonly disabled?: boolean }): ReactElement {
   return <Pressable style={[styles.secondaryButton, props.disabled === true && styles.disabled]} disabled={props.disabled} onPress={props.onPress}><Text style={styles.secondaryButtonText}>{props.label}</Text></Pressable>;
 }
+
 function LoadingScreen(): ReactElement {
   return <SafeAreaView style={[styles.safe, styles.loading]}><StatusBar style="light" /><ActivityIndicator size="large" /><Text style={styles.loadingText}>Opening secure session…</Text></SafeAreaView>;
 }
 
+async function loadDashboard(publicOrigin: string, accessToken: string): Promise<DashboardData> {
+  const [host, workspaces, taskState] = await Promise.all([
+    getHostStatus(publicOrigin, accessToken),
+    listWorkspaces(publicOrigin, accessToken),
+    readTasks(publicOrigin, accessToken),
+  ]);
+  return { host, workspaces, tasks: taskState.tasks, tasksAvailable: taskState.available };
+}
+
+async function readTasks(publicOrigin: string, accessToken: string): Promise<{ readonly available: boolean; readonly tasks: readonly CompanionTaskSummary[] }> {
+  try {
+    return { available: true, tasks: await listTasks(publicOrigin, accessToken) };
+  } catch (cause: unknown) {
+    if (isForbidden(cause)) return { available: false, tasks: [] };
+    throw cause;
+  }
+}
+
+function applyDashboard(
+  dashboard: DashboardData,
+  setHost: (value: CompanionHostStatus) => void,
+  setWorkspaces: (value: readonly CompanionWorkspaceSummary[]) => void,
+  setTasks: (value: readonly CompanionTaskSummary[]) => void,
+  setTasksAvailable: (value: boolean) => void,
+): void {
+  setHost(dashboard.host);
+  setWorkspaces(dashboard.workspaces);
+  setTasks(dashboard.tasks);
+  setTasksAvailable(dashboard.tasksAvailable);
+}
+
+function taskKindLabel(kind: CompanionTaskSummary['kind']): string {
+  if (kind === 'durable_goal') return 'DURABLE GOAL';
+  if (kind === 'managed_task') return 'MANAGED TASK';
+  return kind.toUpperCase();
+}
+
+function taskStateLabel(state: CompanionTaskSummary['state']): string {
+  return state.replaceAll('_', ' ').toUpperCase();
+}
+
+function formatTaskTime(value: string): string {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+}
+
 function messageOf(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isUnauthorized(error: unknown): boolean { return typeof error === 'object' && error !== null && 'status' in error && (error as { readonly status?: unknown }).status === 401; }
+function isForbidden(error: unknown): boolean { return typeof error === 'object' && error !== null && 'status' in error && (error as { readonly status?: unknown }).status === 403; }
 function shortId(value: string): string { return value.length <= 18 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`; }
 
 const GOLD = '#E6C45B';
@@ -487,6 +641,15 @@ const styles = StyleSheet.create({
   activeBadge: { color: GOLD, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   idleBadge: { color: '#657082', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   emptyText: { color: MUTED, fontSize: 13, lineHeight: 20 },
+  taskCard: { backgroundColor: CARD, borderWidth: 1, borderColor: BORDER, borderRadius: 18, padding: 16, marginBottom: 12 },
+  taskTopLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  taskKind: { color: GOLD, fontSize: 9, fontWeight: '900', letterSpacing: 1.1 },
+  taskState: { color: '#8994A6', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  taskStateRunning: { color: '#70E3A7' },
+  taskTitle: { color: '#F1F3F7', fontSize: 16, fontWeight: '800', marginTop: 10, marginBottom: 5 },
+  taskProgress: { color: '#CCD3DE', fontSize: 13, lineHeight: 19, marginBottom: 4 },
+  taskMetaRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginTop: 12 },
+  taskMeta: { color: '#626D7E', fontSize: 10, flexShrink: 1 },
   tabBar: { minHeight: 72, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: BORDER, backgroundColor: '#090D13', flexDirection: 'row', paddingBottom: Platform.OS === 'ios' ? 8 : 2 },
   tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3 },
   tabGlyph: { color: '#667184', fontSize: 19, fontWeight: '700' },
