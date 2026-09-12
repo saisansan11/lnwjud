@@ -52,6 +52,9 @@ import {
   type SaveTunnelApiKeyRequest,
   type SaveRemoteMcpAuthtokenRequest,
   type RemoteMcpStatus,
+  type CompanionPairingResult,
+  type CompanionDeviceSummary,
+  type RevokeCompanionDeviceRequest,
   type ScheduleRestoreBackupRequest,
   type SelectWorkspaceRequest,
   type SetWorkspaceActiveRequest,
@@ -321,6 +324,55 @@ function remoteMcpStatus(value: unknown): RemoteMcpStatus {
     autoStartEnabled: booleanField(value, 'autoStartEnabled'),
     message: nullableString(value.message),
   };
+}
+
+function companionDeviceSummary(value: unknown): CompanionDeviceSummary {
+  if (!isRecord(value)) throw new Error('Invalid IPC response');
+  const platform = value.platform;
+  if (platform !== 'ios' && platform !== 'android') throw new Error('Invalid IPC response');
+  return {
+    deviceId: stringField(value, 'deviceId'),
+    deviceName: stringField(value, 'deviceName'),
+    platform,
+    pairedAt: stringField(value, 'pairedAt'),
+    lastSeenAt: nullableString(value.lastSeenAt),
+    revokedAt: nullableString(value.revokedAt),
+  };
+}
+
+function companionDeviceList(value: unknown): readonly CompanionDeviceSummary[] {
+  if (!Array.isArray(value) || value.length > 32) throw new Error('Invalid IPC response');
+  return value.map(companionDeviceSummary);
+}
+
+function companionPairingResult(value: unknown): CompanionPairingResult {
+  if (!isRecord(value) || !isRecord(value.qr)) throw new Error('Invalid IPC response');
+  const qr = value.qr;
+  if (qr.schemaVersion !== 1 || qr.kind !== 'lnwjud-companion-pairing') throw new Error('Invalid IPC response');
+  const pairingCode = stringField(value, 'pairingCode');
+  if (!/^\d{6}$/.test(pairingCode)) throw new Error('Invalid IPC response');
+  const publicOrigin = stringField(qr, 'publicOrigin');
+  const parsedOrigin = new URL(publicOrigin);
+  if (parsedOrigin.protocol !== 'https:') throw new Error('Invalid IPC response');
+  return {
+    qr: {
+      schemaVersion: 1,
+      kind: 'lnwjud-companion-pairing',
+      hostId: stringField(qr, 'hostId'),
+      publicOrigin: parsedOrigin.origin,
+      pairingTicket: stringField(qr, 'pairingTicket'),
+      expiresAt: stringField(qr, 'expiresAt'),
+    },
+    pairingCode,
+  };
+}
+
+function revokeCompanionDevice(request: RevokeCompanionDeviceRequest): Promise<{ readonly revoked: boolean; readonly devices: readonly CompanionDeviceSummary[] }> {
+  if (!isRecord(request) || typeof request.deviceId !== 'string' || request.deviceId.trim().length === 0 || request.deviceId.length > 256) return Promise.reject(new Error('Invalid IPC request'));
+  return invoke(ipcChannels.revokeCompanionDevice, { deviceId: request.deviceId.trim() }).then((value: unknown) => {
+    if (!isRecord(value)) throw new Error('Invalid IPC response');
+    return { revoked: booleanField(value, 'revoked'), devices: companionDeviceList(value.devices) };
+  });
 }
 
 function userSettings(value: unknown): UserSettings {
@@ -1354,6 +1406,9 @@ const api: LnwjudApi = {
   startRemoteMcp: () => invoke(ipcChannels.startRemoteMcp).then(remoteMcpStatus),
   stopRemoteMcp: () => invoke(ipcChannels.stopRemoteMcp).then(remoteMcpStatus),
   regenerateRemoteMcpPairingCode: () => invoke(ipcChannels.regenerateRemoteMcpPairingCode).then(remoteMcpStatus),
+  beginCompanionPairing: () => invoke(ipcChannels.beginCompanionPairing).then(companionPairingResult),
+  listCompanionDevices: () => invoke(ipcChannels.listCompanionDevices).then(companionDeviceList),
+  revokeCompanionDevice,
   setTunnelClientPath,
   setLocale,
   setUserSettings,

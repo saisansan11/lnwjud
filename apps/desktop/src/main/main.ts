@@ -43,6 +43,7 @@ import {
   type SaveTunnelApiKeyRequest,
   type SaveRemoteMcpAuthtokenRequest,
   type RemoteMcpStatus,
+  type RevokeCompanionDeviceRequest,
   type ScheduleRestoreBackupRequest,
   type SelectWorkspaceRequest,
   type SetWorkspaceActiveRequest,
@@ -143,6 +144,9 @@ export interface DesktopIpcServices {
   startRemoteMcp(): Promise<RemoteMcpStatus>;
   stopRemoteMcp(): Promise<RemoteMcpStatus>;
   regenerateRemoteMcpPairingCode(): Promise<RemoteMcpStatus>;
+  beginCompanionPairing(): Promise<IpcResponseMap[typeof ipcChannels.beginCompanionPairing]>;
+  listCompanionDevices(): Promise<IpcResponseMap[typeof ipcChannels.listCompanionDevices]>;
+  revokeCompanionDevice(request: RevokeCompanionDeviceRequest): Promise<IpcResponseMap[typeof ipcChannels.revokeCompanionDevice]>;
   setTunnelClientPath(request: SetTunnelClientPathRequest): Promise<{ readonly clientPath: string }>;
   setLocale(request: SetLocaleRequest): Promise<{ readonly locale: UiLocale }>;
   setUserSettings(request: SetUserSettingsRequest): Promise<{ readonly settings: UserSettings; readonly restartRequired: boolean }>;
@@ -316,6 +320,9 @@ const defaultDesktopServices: DesktopIpcServices = {
   startRemoteMcp: async (): Promise<RemoteMcpStatus> => emptyRemoteMcp,
   stopRemoteMcp: async (): Promise<RemoteMcpStatus> => emptyRemoteMcp,
   regenerateRemoteMcpPairingCode: async (): Promise<RemoteMcpStatus> => emptyRemoteMcp,
+  beginCompanionPairing: async (): Promise<IpcResponseMap[typeof ipcChannels.beginCompanionPairing]> => { throw new Error('Companion pairing is unavailable'); },
+  listCompanionDevices: async (): Promise<IpcResponseMap[typeof ipcChannels.listCompanionDevices]> => [],
+  revokeCompanionDevice: async (): Promise<IpcResponseMap[typeof ipcChannels.revokeCompanionDevice]> => ({ revoked: false, devices: [] }),
   setTunnelClientPath: async (request): Promise<{ readonly clientPath: string }> => ({ clientPath: request.clientPath }),
   setLocale: async (request): Promise<{ readonly locale: UiLocale }> => ({ locale: request.locale }),
   setUserSettings: async (request): Promise<{ readonly settings: UserSettings; readonly restartRequired: boolean }> => ({ settings: request.settings, restartRequired: false }),
@@ -564,6 +571,20 @@ export function registerIpcHandlers(
     assertTrustedSender(event, getMainWindow());
     assertNoPayload(payload);
     return services.regenerateRemoteMcpPairingCode();
+  });
+  registerHandler(ipcChannels.beginCompanionPairing, async (event, payload: unknown) => {
+    assertTrustedSender(event, getMainWindow());
+    assertNoPayload(payload);
+    return services.beginCompanionPairing();
+  });
+  registerHandler(ipcChannels.listCompanionDevices, async (event, payload: unknown) => {
+    assertTrustedSender(event, getMainWindow());
+    assertNoPayload(payload);
+    return services.listCompanionDevices();
+  });
+  registerHandler(ipcChannels.revokeCompanionDevice, async (event, payload: unknown) => {
+    assertTrustedSender(event, getMainWindow());
+    return services.revokeCompanionDevice(parseRevokeCompanionDeviceRequest(payload));
   });
   registerHandler(ipcChannels.setTunnelClientPath, async (event, payload: unknown) => {
     assertTrustedSender(event, getMainWindow());
@@ -1038,6 +1059,13 @@ function parseSaveRemoteMcpAuthtokenRequest(payload: unknown): SaveRemoteMcpAuth
   return { authtoken: nonEmptyString(payload.authtoken, 'authtoken') };
 }
 
+function parseRevokeCompanionDeviceRequest(payload: unknown): RevokeCompanionDeviceRequest {
+  if (!isRecord(payload) || Object.keys(payload).some((key) => key !== 'deviceId')) throw new Error('Invalid IPC payload');
+  const deviceId = nonEmptyString(payload.deviceId, 'deviceId');
+  if (deviceId.length > 256) throw new Error('Invalid IPC payload: deviceId');
+  return { deviceId };
+
+}
 function parseSetTunnelClientPathRequest(payload: unknown): SetTunnelClientPathRequest {
   if (!isRecord(payload)) throw new Error('Invalid IPC payload');
   return { clientPath: nonEmptyString(payload.clientPath, 'clientPath') };
