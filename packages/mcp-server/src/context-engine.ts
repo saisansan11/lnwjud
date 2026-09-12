@@ -3,6 +3,7 @@ import { err, ok, type AppError, type Result } from '@lnwjud/domain';
 import type { FileActor, GitService, SearchService } from '@lnwjud/application';
 import { classifyContextPath } from '@lnwjud/search';
 import type { McpApplicationServices } from './tools/tool-types.js';
+import { BoundedContinuationStore } from './bounded-continuation-store.js';
 import { ContextEconomyRuntime, type ContextEconomyStats, type ContextDeliveryKind } from './context-economy.js';
 
 export type ContextIntent = 'auto' | 'debug' | 'implement' | 'review' | 'trace' | 'explore';
@@ -164,10 +165,13 @@ const DEFAULT_RESPONSE_TARGET_BYTES = 256 * 1024;
 const MAX_RESPONSE_TARGET_BYTES = 8 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE: Record<ContextMode, number> = { optimized: 12, full: 50, exhaustive: 200 };
 const SEARCH_LIMIT: Record<ContextMode, number> = { optimized: 100, full: 300, exhaustive: 500 };
+const CONTINUATION_TTL_MS = 15 * 60 * 1000;
+const MAX_CONTEXT_CONTINUATIONS = 32;
+const MAX_SCAN_CONTINUATIONS = 8;
 
 export class ContextEngine {
-  private readonly continuations = new Map<string, Continuation>();
-  private readonly scanContinuations = new Map<string, ScanContinuation>();
+  private readonly continuations = new BoundedContinuationStore<Continuation>({ maxEntries: MAX_CONTEXT_CONTINUATIONS, ttlMs: CONTINUATION_TTL_MS });
+  private readonly scanContinuations = new BoundedContinuationStore<ScanContinuation>({ maxEntries: MAX_SCAN_CONTINUATIONS, ttlMs: CONTINUATION_TTL_MS });
 
   public constructor(
     private readonly services: McpApplicationServices,
@@ -203,9 +207,8 @@ export class ContextEngine {
   }
 
   public async continue(token: string, pageSize?: number): Promise<Result<WorkspaceContextResult>> {
-    const continuation = this.continuations.get(token);
+    const continuation = this.continuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Continuation token is invalid or expired', recoverable: false });
-    this.continuations.delete(token);
     return this.materialize(continuation.candidates, {
       ...continuation.request,
       ...(pageSize === undefined ? {} : { pageSize }),
@@ -307,9 +310,8 @@ export class ContextEngine {
   }
 
   public async continueFullScan(token: string, pageSize?: number): Promise<Result<WorkspaceFullScanResult>> {
-    const continuation = this.scanContinuations.get(token);
+    const continuation = this.scanContinuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Scan continuation token is invalid or expired', recoverable: false });
-    this.scanContinuations.delete(token);
     const size = normalizePageSize(pageSize ?? 200);
     const files = continuation.files.slice(0, size);
     const remaining = continuation.files.slice(files.length);

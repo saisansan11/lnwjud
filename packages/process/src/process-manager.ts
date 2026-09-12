@@ -13,10 +13,11 @@ const MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const START_CANCELLATION_RETRY_MS = 250;
 
 export const DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES = 24;
+export const DEFAULT_MAX_RETAINED_TERMINAL_PROCESSES = 32;
 
 interface ManagedRecord {
   readonly processId: string;
-  readonly child: ChildProcess;
+  child?: ChildProcess;
   readonly spec: ManagedProcessStart;
   readonly startedAt: string;
   readonly logs: LogRingBuffer;
@@ -40,6 +41,7 @@ export class ProcessManager {
     private readonly executableResolver: ExecutableResolver = new PathExecutableResolver(),
     private readonly maxActiveProcesses: number = DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES,
     private readonly invocationFactory: SpawnInvocationFactory = createSpawnInvocationFactory(),
+    private readonly maxRetainedTerminalProcesses: number = DEFAULT_MAX_RETAINED_TERMINAL_PROCESSES,
   ) {}
 
   public async start(
@@ -98,7 +100,7 @@ export class ProcessManager {
         if (settled) return;
         cancellationRequested = true;
         if (cancellationInProgress) return;
-        const pid = record.child.pid;
+        const pid = record.child?.pid;
         if (pid === undefined) return;
         cancellationInProgress = true;
         void (async (): Promise<void> => {
@@ -220,8 +222,9 @@ export class ProcessManager {
     record.terminationTarget = targetState;
     record.stopRequested = targetState;
     if (record.timer !== undefined) clearTimeout(record.timer);
-    const pid = record.child.pid;
-    if (pid === undefined) {
+    const child = record.child;
+    const pid = child?.pid;
+    if (child === undefined || pid === undefined) {
       delete record.stopRequested;
       this.markTerminationUnverified(record, targetState === 'timed_out'
         ? 'Timed-out process termination could not be verified'
@@ -229,7 +232,7 @@ export class ProcessManager {
       return false;
     }
     try {
-      await this.terminator.stop(record.child, pid);
+      await this.terminator.stop(child, pid);
       this.finish(record, targetState);
       return true;
     } catch {
@@ -248,9 +251,12 @@ export class ProcessManager {
     delete record.terminationTarget;
     record.finishedAt = new Date().toISOString();
     if (record.timer !== undefined) clearTimeout(record.timer);
+    delete record.timer;
     record.resolveTerminationVerified?.();
     delete record.resolveTerminationVerified;
     delete record.terminationVerified;
+    delete record.child;
+    this.pruneTerminalRecords();
   }
 
   private markTerminationUnverified(record: ManagedRecord, errorMessage: string): void {
@@ -258,6 +264,7 @@ export class ProcessManager {
     record.errorMessage = errorMessage;
     delete record.finishedAt;
     if (record.timer !== undefined) clearTimeout(record.timer);
+    delete record.timer;
     if (record.terminationVerified === undefined) {
       record.terminationVerified = new Promise<void>((resolve) => { record.resolveTerminationVerified = resolve; });
     }
@@ -269,6 +276,18 @@ export class ProcessManager {
       record.terminationVerified = new Promise<void>((resolve) => { record.resolveTerminationVerified = resolve; });
     }
     return record.terminationVerified;
+  }
+
+  private pruneTerminalRecords(): void {
+    const limit = Math.max(1, Math.floor(this.maxRetainedTerminalProcesses));
+    const completed = [...this.records.values()]
+      .filter((record) => isVerifiedTerminal(record.state))
+      .sort((left, right) => (left.finishedAt ?? left.startedAt).localeCompare(right.finishedAt ?? right.startedAt));
+    const excess = completed.length - limit;
+    if (excess <= 0) return;
+    for (const record of completed.slice(0, excess)) {
+      this.records.delete(record.processId);
+    }
   }
 
   private snapshot(record: ManagedRecord): ManagedProcess {
@@ -306,8 +325,8 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function isChildLive(child: ChildProcess): boolean {
-  return child.exitCode === null && child.signalCode === null;
+function isChildLive(child: ChildProcess | undefined): boolean {
+  return child !== undefined && child.exitCode === null && child.signalCode === null;
 }
 
 
