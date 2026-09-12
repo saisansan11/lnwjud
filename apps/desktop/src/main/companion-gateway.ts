@@ -17,10 +17,11 @@ import {
 import type { SecretProtector } from '@lnwjud/shared';
 
 const PAIRING_TTL_MS = 5 * 60_000;
-const ACCESS_TTL_MS = 24 * 60 * 60_000;
+const ACCESS_TTL_MS = 8 * 60 * 60_000;
+const REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
 const READ_ONLY_SCOPES = ['companion.status.read', 'companion.workspace.read'] as const satisfies readonly CompanionScope[];
 const MAX_DEVICES = 16;
-const MAX_GRANTS = 16;
+const MAX_REFRESH_GRANTS = 16;
 
 interface PairingSession {
   readonly ticket: string;
@@ -39,7 +40,14 @@ interface CompanionGrant {
 interface CompanionPersistedState {
   readonly schemaVersion: 1;
   readonly devices: readonly CompanionDevice[];
-  readonly grants: readonly CompanionGrant[];
+  readonly refreshGrants: readonly CompanionGrant[];
+}
+
+interface CompanionTokenPair {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly accessGrant: CompanionGrant;
+  readonly refreshGrant: CompanionGrant;
 }
 
 export interface CompanionPairingBundle {
@@ -62,7 +70,8 @@ export class CompanionGateway {
   private readonly listWorkspaces: () => Promise<readonly CompanionWorkspaceSummary[]>;
   private readonly secretProtector: SecretProtector;
   private readonly devices = new Map<string, CompanionDevice>();
-  private readonly grants = new Map<string, CompanionGrant>();
+  private readonly accessGrants = new Map<string, CompanionGrant>();
+  private readonly refreshGrants = new Map<string, CompanionGrant>();
   private pairing: PairingSession | null = null;
   private loaded = false;
   private loadPromise: Promise<void> | null = null;
@@ -98,9 +107,7 @@ export class CompanionGateway {
     const existing = this.devices.get(deviceId);
     if (existing === undefined || existing.revokedAt !== null) return false;
     this.devices.set(deviceId, { ...existing, revokedAt: new Date(this.now()).toISOString() });
-    for (const [digest, grant] of this.grants) {
-      if (grant.deviceId === deviceId) this.grants.delete(digest);
-    }
+    this.deleteDeviceGrants(deviceId);
     await this.persist();
     return true;
   }
@@ -136,27 +143,32 @@ export class CompanionGateway {
         lastSeenAt: nowIso,
         revokedAt: null,
       };
+      this.deleteDeviceGrants(device.deviceId);
       this.devices.set(device.deviceId, device);
-      for (const [digest, grant] of this.grants) {
-        if (grant.deviceId === device.deviceId) this.grants.delete(digest);
-      }
-      const accessToken = `lnwjud_comp_${randomBytes(32).toString('base64url')}`;
-      const grant: CompanionGrant = {
-        tokenSha256: sha256(accessToken),
-        deviceId: device.deviceId,
-        scopes: READ_ONLY_SCOPES,
-        expiresAt: this.now() + ACCESS_TTL_MS,
-      };
-      this.grants.set(grant.tokenSha256, grant);
-      this.pairing = null;
+      const pair = this.createTokenPair(device.deviceId, READ_ONLY_SCOPES);
+      this.accessGrants.set(pair.accessGrant.tokenSha256, pair.accessGrant);
+      this.refreshGrants.set(pair.refreshGrant.tokenSha256, pair.refreshGrant);
       await this.persist();
-      json(response, 201, {
-        access_token: accessToken,
-        token_type: 'Bearer',
-        expires_in: Math.floor(ACCESS_TTL_MS / 1_000),
-        device,
-        scopes: grant.scopes,
-      });
+      this.pairing = null;
+      tokenResponse(response, 201, pair, device);
+      return true;
+    }
+
+    if (request.method === 'POST' && url.pathname === `${COMPANION_API_PREFIX}/token`) {
+      let refreshToken: string;
+      try {
+        const body = strictRecord(await readJson(request, 16 * 1024), ['refreshToken']);
+        refreshToken = boundedString(body.refreshToken, 'refreshToken', 256);
+      } catch (error) {
+        json(response, 400, { error: 'invalid_request', error_description: errorMessage(error) });
+        return true;
+      }
+      const rotated = await this.rotateRefreshToken(refreshToken);
+      if (rotated === null) {
+        json(response, 401, { error: 'invalid_grant' });
+        return true;
+      }
+      tokenResponse(response, 200, rotated.pair, rotated.device);
       return true;
     }
 
@@ -187,12 +199,12 @@ export class CompanionGateway {
 
   private authorize(request: IncomingMessage, route: 'status.get' | 'workspaces.list'): { readonly ok: true } | { readonly ok: false; readonly status: 401 | 403 } {
     const bearer = parseBearer(request.headers.authorization);
-    if (bearer === null || !bearer.startsWith('lnwjud_comp_')) return { ok: false, status: 401 };
+    if (bearer === null || !bearer.startsWith('lnwjud_comp_') || bearer.startsWith('lnwjud_comp_refresh_')) return { ok: false, status: 401 };
     const digest = sha256(bearer);
-    const grant = this.grants.get(digest);
+    const grant = this.accessGrants.get(digest);
     if (grant === undefined) return { ok: false, status: 401 };
     if (grant.expiresAt <= this.now()) {
-      this.grants.delete(digest);
+      this.accessGrants.delete(digest);
       return { ok: false, status: 401 };
     }
     const device = this.devices.get(grant.deviceId);
@@ -200,6 +212,49 @@ export class CompanionGateway {
     if (!companionScopesAllow(grant.scopes, route)) return { ok: false, status: 403 };
     this.devices.set(device.deviceId, { ...device, lastSeenAt: new Date(this.now()).toISOString() });
     return { ok: true };
+  }
+
+  private async rotateRefreshToken(value: string): Promise<{ readonly pair: CompanionTokenPair; readonly device: CompanionDevice } | null> {
+    if (!value.startsWith('lnwjud_comp_refresh_')) return null;
+    const digest = sha256(value);
+    const grant = this.refreshGrants.get(digest);
+    if (grant === undefined || grant.expiresAt <= this.now()) {
+      if (grant !== undefined) this.refreshGrants.delete(digest);
+      return null;
+    }
+    const device = this.devices.get(grant.deviceId);
+    if (device === undefined || device.revokedAt !== null) return null;
+    const pair = this.createTokenPair(device.deviceId, grant.scopes);
+    this.refreshGrants.delete(digest);
+    this.refreshGrants.set(pair.refreshGrant.tokenSha256, pair.refreshGrant);
+    this.accessGrants.set(pair.accessGrant.tokenSha256, pair.accessGrant);
+    try {
+      await this.persist();
+    } catch (error) {
+      this.refreshGrants.delete(pair.refreshGrant.tokenSha256);
+      this.accessGrants.delete(pair.accessGrant.tokenSha256);
+      this.refreshGrants.set(digest, grant);
+      throw error;
+    }
+    const refreshedDevice = { ...device, lastSeenAt: new Date(this.now()).toISOString() };
+    this.devices.set(device.deviceId, refreshedDevice);
+    return { pair, device: refreshedDevice };
+  }
+
+  private createTokenPair(deviceId: string, scopes: readonly CompanionScope[]): CompanionTokenPair {
+    const accessToken = `lnwjud_comp_${randomBytes(32).toString('base64url')}`;
+    const refreshToken = `lnwjud_comp_refresh_${randomBytes(32).toString('base64url')}`;
+    return {
+      accessToken,
+      refreshToken,
+      accessGrant: { tokenSha256: sha256(accessToken), deviceId, scopes, expiresAt: this.now() + ACCESS_TTL_MS },
+      refreshGrant: { tokenSha256: sha256(refreshToken), deviceId, scopes, expiresAt: this.now() + REFRESH_TTL_MS },
+    };
+  }
+
+  private deleteDeviceGrants(deviceId: string): void {
+    for (const [digest, grant] of this.accessGrants) if (grant.deviceId === deviceId) this.accessGrants.delete(digest);
+    for (const [digest, grant] of this.refreshGrants) if (grant.deviceId === deviceId) this.refreshGrants.delete(digest);
   }
 
   private verifyPairing(ticket: string, code: string): boolean {
@@ -239,7 +294,7 @@ export class CompanionGateway {
     const decrypted = await this.secretProtector.decrypt('companion_state', encrypted.trim());
     const state = normalizeState(JSON.parse(decrypted.plainText) as unknown, this.now());
     for (const device of state.devices) this.devices.set(device.deviceId, device);
-    for (const grant of state.grants) this.grants.set(grant.tokenSha256, grant);
+    for (const grant of state.refreshGrants) this.refreshGrants.set(grant.tokenSha256, grant);
     this.loaded = true;
     if (decrypted.shouldReEncrypt) await this.persist();
   }
@@ -250,15 +305,26 @@ export class CompanionGateway {
     const now = this.now();
     const devices = [...this.devices.values()].slice(-MAX_DEVICES);
     const deviceIds = new Set(devices.map((device) => device.deviceId));
-    const grants = [...this.grants.values()]
+    const refreshGrants = [...this.refreshGrants.values()]
       .filter((grant) => grant.expiresAt > now && deviceIds.has(grant.deviceId))
-      .slice(-MAX_GRANTS);
-    const plainText = JSON.stringify({ schemaVersion: 1, devices, grants } satisfies CompanionPersistedState);
+      .slice(-MAX_REFRESH_GRANTS);
+    const plainText = JSON.stringify({ schemaVersion: 1, devices, refreshGrants } satisfies CompanionPersistedState);
     const encrypted = await this.secretProtector.encrypt('companion_state', plainText);
     const tempPath = `${this.statePath}.${process.pid}.tmp`;
     await writeFile(tempPath, encrypted, { encoding: 'utf8', mode: 0o600 });
     await rename(tempPath, this.statePath);
   }
+}
+
+function tokenResponse(response: ServerResponse, status: number, pair: CompanionTokenPair, device: CompanionDevice): void {
+  json(response, status, {
+    access_token: pair.accessToken,
+    refresh_token: pair.refreshToken,
+    token_type: 'Bearer',
+    expires_in: Math.floor(ACCESS_TTL_MS / 1_000),
+    device,
+    scopes: pair.accessGrant.scopes,
+  });
 }
 
 function parseRegisterRequest(value: unknown): CompanionRegisterDeviceRequest {
@@ -283,17 +349,17 @@ function parseRegisterRequest(value: unknown): CompanionRegisterDeviceRequest {
 }
 
 function normalizeState(value: unknown, now: number): CompanionPersistedState {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return { schemaVersion: 1, devices: [], grants: [] };
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return { schemaVersion: 1, devices: [], refreshGrants: [] };
   const record = value as Record<string, unknown>;
-  if (record.schemaVersion !== 1) return { schemaVersion: 1, devices: [], grants: [] };
+  if (record.schemaVersion !== 1) return { schemaVersion: 1, devices: [], refreshGrants: [] };
   const devices = Array.isArray(record.devices)
     ? record.devices.flatMap((entry): CompanionDevice[] => {
       try { return [normalizeDevice(entry)]; } catch { return []; }
     }).slice(-MAX_DEVICES)
     : [];
   const deviceIds = new Set(devices.filter((device) => device.revokedAt === null).map((device) => device.deviceId));
-  const grants = Array.isArray(record.grants)
-    ? record.grants.flatMap((entry): CompanionGrant[] => {
+  const refreshGrants = Array.isArray(record.refreshGrants)
+    ? record.refreshGrants.flatMap((entry): CompanionGrant[] => {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [];
       const grant = entry as Record<string, unknown>;
       if (typeof grant.tokenSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(grant.tokenSha256)) return [];
@@ -301,9 +367,9 @@ function normalizeState(value: unknown, now: number): CompanionPersistedState {
       if (!Array.isArray(grant.scopes) || grant.scopes.some((scope) => scope !== 'companion.status.read' && scope !== 'companion.workspace.read')) return [];
       if (typeof grant.expiresAt !== 'number' || !Number.isFinite(grant.expiresAt) || grant.expiresAt <= now) return [];
       return [{ tokenSha256: grant.tokenSha256, deviceId: grant.deviceId, scopes: grant.scopes as CompanionScope[], expiresAt: grant.expiresAt }];
-    }).slice(-MAX_GRANTS)
+    }).slice(-MAX_REFRESH_GRANTS)
     : [];
-  return { schemaVersion: 1, devices, grants };
+  return { schemaVersion: 1, devices, refreshGrants };
 }
 
 function normalizeDevice(value: unknown): CompanionDevice {

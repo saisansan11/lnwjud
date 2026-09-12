@@ -423,23 +423,31 @@ describe('Companion read-only gateway', () => {
         }),
       });
       expect(registration.status).toBe(201);
-      const registered = await registration.json() as { access_token: string; scopes: string[] };
+      const registered = await registration.json() as { access_token: string; refresh_token: string; scopes: string[] };
       expect(registered.access_token).toMatch(/^lnwjud_comp_/);
+      expect(registered.refresh_token).toMatch(/^lnwjud_comp_refresh_/);
       expect(registered.scopes).toEqual(['companion.status.read', 'companion.workspace.read']);
 
       const persisted = await readFile(path.join(root, 'companion', 'state.secret'), 'utf8');
       expect(persisted).toMatch(/^safe:v1:/);
       expect(persisted).not.toContain(registered.access_token);
+      expect(persisted).not.toContain(registered.refresh_token);
       expect(persisted).not.toContain('ios-device-1');
       const decrypted = await secretProtector.decrypt('companion_state', persisted.trim());
       expect(decrypted.plainText).toContain('ios-device-1');
       expect(decrypted.plainText).not.toContain(registered.access_token);
+      expect(decrypted.plainText).not.toContain(registered.refresh_token);
 
       const status = await fetch(`${origin}/companion/v1/status`, {
         headers: { authorization: `Bearer ${registered.access_token}` },
       });
       expect(status.status).toBe(200);
       expect(await status.json()).toEqual(hostStatus);
+
+      const refreshAsBearer = await fetch(`${origin}/companion/v1/status`, {
+        headers: { authorization: `Bearer ${registered.refresh_token}` },
+      });
+      expect(refreshAsBearer.status).toBe(401);
 
       const workspaceResponse = await fetch(`${origin}/companion/v1/workspaces`, {
         headers: { authorization: `Bearer ${registered.access_token}` },
@@ -464,12 +472,64 @@ describe('Companion read-only gateway', () => {
       });
       expect(oauthOnCompanion.status).toBe(401);
 
-      expect(await controller.revokeCompanionDevice('ios-device-1')).toBe(true);
-      const revoked = await fetch(`${origin}/companion/v1/status`, {
-        headers: { authorization: `Bearer ${registered.access_token}` },
+      await controller.close();
+      const restarted = new RemoteMcpController({
+        dataPath: root,
+        getLocalMcpUrl: async (): Promise<string> => `${upstreamOrigin}/mcp`,
+        getCompanionHostStatus: async (): Promise<CompanionHostStatus> => hostStatus,
+        listCompanionWorkspaces: async (): Promise<readonly CompanionWorkspaceSummary[]> => workspaces,
+        secretProtector,
       });
-      expect(revoked.status).toBe(401);
-      expect((await controller.listCompanionDevices())[0]?.revokedAt).not.toBeNull();
+      try {
+        const restartedInternal = restarted as unknown as RemoteMcpTestAccess;
+        await restartedInternal.startGateway(`${upstreamOrigin}/mcp`);
+        restartedInternal.publicOrigin = 'https://companion.example.test';
+        restartedInternal.runState = 'running';
+        const restartedOrigin = restartedInternal.gatewayUrl!;
+
+        const oldAccessAfterRestart = await fetch(`${restartedOrigin}/companion/v1/status`, {
+          headers: { authorization: `Bearer ${registered.access_token}` },
+        });
+        expect(oldAccessAfterRestart.status).toBe(401);
+
+        const refresh = await fetch(`${restartedOrigin}/companion/v1/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: registered.refresh_token }),
+        });
+        expect(refresh.status).toBe(200);
+        const refreshed = await refresh.json() as { access_token: string; refresh_token: string };
+        expect(refreshed.access_token).toMatch(/^lnwjud_comp_/);
+        expect(refreshed.refresh_token).toMatch(/^lnwjud_comp_refresh_/);
+        expect(refreshed.refresh_token).not.toBe(registered.refresh_token);
+
+        const replay = await fetch(`${restartedOrigin}/companion/v1/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: registered.refresh_token }),
+        });
+        expect(replay.status).toBe(401);
+
+        const refreshedStatus = await fetch(`${restartedOrigin}/companion/v1/status`, {
+          headers: { authorization: `Bearer ${refreshed.access_token}` },
+        });
+        expect(refreshedStatus.status).toBe(200);
+
+        expect(await restarted.revokeCompanionDevice('ios-device-1')).toBe(true);
+        const revoked = await fetch(`${restartedOrigin}/companion/v1/status`, {
+          headers: { authorization: `Bearer ${refreshed.access_token}` },
+        });
+        expect(revoked.status).toBe(401);
+        expect((await restarted.listCompanionDevices())[0]?.revokedAt).not.toBeNull();
+        const refreshAfterRevoke = await fetch(`${restartedOrigin}/companion/v1/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: refreshed.refresh_token }),
+        });
+        expect(refreshAfterRevoke.status).toBe(401);
+      } finally {
+        await restarted.close();
+      }
     } finally {
       await controller.close();
       await rm(root, { recursive: true, force: true });
