@@ -2,10 +2,15 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 describe('desktop performance contract', () => {
-  it('keeps the main renderer refresh single-flight and below the old 1 Hz pressure', () => {
+  it('keeps the main renderer refresh single-flight and backs off when hidden', () => {
     const source = readFileSync(new URL('../src/renderer/App.tsx', import.meta.url), 'utf8');
     expect(source).toContain('if (refreshBusyRef.current) return;');
-    expect(source).toContain('window.setInterval(() => { void refresh(); }, 2_000)');
+    expect(source).toContain('const ACTIVE_DASHBOARD_REFRESH_MS = 5_000;');
+    expect(source).toContain('const HIDDEN_DASHBOARD_REFRESH_MS = 30_000;');
+    expect(source).toContain("document.visibilityState === 'hidden'");
+    expect(source).toContain("document.addEventListener('visibilitychange', handleVisibilityChange)");
+    expect(source).toContain('window.setTimeout(() => {');
+    expect(source).not.toContain('window.setInterval(() => { void refresh(); }, 2_000)');
     expect(source).not.toContain('window.setInterval(() => { void refresh(); }, 1_000)');
   });
 
