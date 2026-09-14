@@ -47,6 +47,8 @@ import { createTranslator } from './i18n/index.js';
 import { markStartupDoctorPassed, startupDoctorCorePassed, startupDoctorNavigationTarget, startupDoctorRequired } from './features/onboarding/startup-doctor-state.js';
 
 const MAX_CLIENT_LOG_LINES = 30_000;
+const ACTIVE_DASHBOARD_REFRESH_MS = 5_000;
+const HIDDEN_DASHBOARD_REFRESH_MS = 30_000;
 
 export function App(): ReactElement {
   const [screen, setScreen] = useState<Screen>('home');
@@ -249,9 +251,36 @@ export function App(): ReactElement {
   }, [locale]);
 
   useEffect(() => {
+    let disposed = false;
+    let refreshTimer: number | null = null;
+
+    const scheduleRefresh = (): void => {
+      if (disposed) return;
+      const delay = document.visibilityState === 'hidden'
+        ? HIDDEN_DASHBOARD_REFRESH_MS
+        : ACTIVE_DASHBOARD_REFRESH_MS;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void refresh();
+        scheduleRefresh();
+      }, delay);
+    };
+
+    const handleVisibilityChange = (): void => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = null;
+      if (document.visibilityState === 'visible') void refresh();
+      scheduleRefresh();
+    };
+
     void refresh();
-    const interval = window.setInterval(() => { void refresh(); }, 2_000);
-    return (): void => { window.clearInterval(interval); };
+    scheduleRefresh();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return (): void => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+    };
   }, [refresh]);
 
   useEffect(() => {
