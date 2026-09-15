@@ -51,7 +51,12 @@ export class CodexAdapter {
     const invocation = this.builder.build(discovered.value.status.executablePath, discovered.value.capabilities, instruction, sandboxMode);
     if (!invocation.ok) return invocation;
     if (isAborted(signal)) return cancelledCodexStart();
-    return this.processManager.start({ executable: invocation.value.executable, args: invocation.value.args, cwd }, signal, onCreated);
+    return this.processManager.start({
+      executable: invocation.value.executable,
+      args: invocation.value.args,
+      cwd,
+      ...(invocation.value.stdinText === undefined ? {} : { stdinText: invocation.value.stdinText }),
+    }, signal, onCreated);
   }
 
   public statusProcess(processId: string): Result<ManagedProcess> {

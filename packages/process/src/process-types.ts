@@ -4,6 +4,7 @@ export interface ManagedProcessStart {
   readonly executable: string;
   readonly args: readonly string[];
   readonly cwd: string;
+  readonly stdinText?: string;
   readonly timeoutMs?: number;
 }
 

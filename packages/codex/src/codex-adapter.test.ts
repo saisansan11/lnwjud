@@ -20,9 +20,49 @@ describe('CodexAdapter', () => {
     expect(result).toMatchObject({ ok: true, value: { processId: 'process-1' } });
     expect(calls).toEqual([{
       executable: 'C:\\tools\\codex.exe',
-      args: ['exec', '--sandbox', 'workspace-write', 'review "quoted" input'],
+      args: ['exec', '--sandbox', 'workspace-write', '-'],
       cwd: 'C:\\workspace',
+      stdinText: 'review "quoted" input',
     }]);
+  });
+
+  it('keeps shell metacharacters out of argv by streaming exec instructions through stdin', async () => {
+    const calls: ManagedProcessStart[] = [];
+    const manager: CodexProcessManagerPort = {
+      async start(spec): Promise<Result<ManagedProcess>> { calls.push(spec); return ok(processHandle()); },
+      status(): Result<ManagedProcess> { return ok(processHandle()); },
+      logs(): Result<ProcessLogResult> { return ok({ entries: [], truncated: false, nextSequence: 0 }); },
+      async stop(): Promise<Result<void>> { return ok(undefined); },
+    };
+    const discovery: CodexDiscoveryPort = { async discover(): Promise<Result<CodexDiscoveryResult>> { return ok(discovered()); } };
+    const instruction = 'review A > B && keep "quotes" | literally';
+
+    const result = await new CodexAdapter(discovery, manager).start('C:\\workspace', instruction);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(calls[0]).toMatchObject({
+      args: ['exec', '--sandbox', 'workspace-write', '-'],
+      stdinText: instruction,
+    });
+  });
+
+  it('preserves the legacy argv path when discovery did not verify stdin prompt support', async () => {
+    const calls: ManagedProcessStart[] = [];
+    const manager: CodexProcessManagerPort = {
+      async start(spec): Promise<Result<ManagedProcess>> { calls.push(spec); return ok(processHandle()); },
+      status(): Result<ManagedProcess> { return ok(processHandle()); },
+      logs(): Result<ProcessLogResult> { return ok({ entries: [], truncated: false, nextSequence: 0 }); },
+      async stop(): Promise<Result<void>> { return ok(undefined); },
+    };
+    const discovery: CodexDiscoveryPort = { async discover(): Promise<Result<CodexDiscoveryResult>> { return ok(discoveredLegacy()); } };
+
+    const result = await new CodexAdapter(discovery, manager).start('C:\\workspace', 'legacy review');
+
+    expect(result).toMatchObject({ ok: true });
+    expect(calls[0]).toMatchObject({
+      args: ['exec', '--sandbox', 'workspace-write', 'legacy review'],
+    });
+    expect(calls[0]).not.toHaveProperty('stdinText');
   });
 
   it('does not start a process after cancellation wins during Codex discovery', async () => {
@@ -58,6 +98,18 @@ function discovered(): CodexDiscoveryResult {
       installed: true,
       executablePath: 'C:\\tools\\codex.exe',
       version: '0.42.1',
+      capabilities: ['exec', 'sandbox', 'workspace-write', 'stdin-prompt'],
+    },
+    capabilities: { instructionMode: 'exec-argument', names: ['exec', 'sandbox', 'workspace-write', 'stdin-prompt'] },
+  };
+}
+
+function discoveredLegacy(): CodexDiscoveryResult {
+  return {
+    status: {
+      installed: true,
+      executablePath: 'C:\\tools\\codex.exe',
+      version: '0.41.0',
       capabilities: ['exec', 'sandbox', 'workspace-write'],
     },
     capabilities: { instructionMode: 'exec-argument', names: ['exec', 'sandbox', 'workspace-write'] },
@@ -68,7 +120,7 @@ function processHandle(): ManagedProcess {
   return {
     processId: 'process-1',
     executable: 'C:\\tools\\codex.exe',
-    args: ['exec', '--sandbox', 'workspace-write', 'review'],
+    args: ['exec', '--sandbox', 'workspace-write', '-'],
     cwd: 'C:\\workspace',
     state: 'running',
     startedAt: new Date(0).toISOString(),

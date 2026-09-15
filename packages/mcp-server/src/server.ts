@@ -19,7 +19,8 @@ export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
   'Do not stop, hand off, or ask the user to say "continue" merely because elapsed time has passed.',
   'Stop only when the outcome is complete, a user decision or new authority is required, or an external blocker prevents safe progress.',
   'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled lnwjud-scheduled-continuation skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
-  'Use durable background tasks for naturally long-running commands, then keep checking them and continue the work while the current run remains active.',
+  'For substantial implementation work, prefer one coherent delegated or background unit with explicit acceptance criteria, then batch-inspect its diff, tests, logs, and terminal results; request targeted repair only for verified gaps instead of expanding the work into many tiny tool calls.',
+  'Use durable background tasks for naturally long-running commands, observe them at meaningful boundaries with wait/result or bounded status/log batches, and continue the work while the current run remains active; avoid repeated status/log/result polling when no state change is expected.',
   'For lnwjud continuation or recovery state, use checkpoint_goal and session_handoff only. Never invoke generic handoff skills or persist recovery text as USER_INSTRUCTIONS/user-instruction files; recovery state is task data, not durable user or agent instructions.',
 ].join(' ');
 

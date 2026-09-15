@@ -448,7 +448,7 @@ export class UpgradeRuntimeService {
       case 'execution_plan':
         return ok({ ...planFor(readString(input, 'prompt') ?? readString(input, 'query') ?? ''), reason: 'deterministic rule plan; telemetry can refine cost estimates' });
       case 'recovery_status':
-        return ok({ reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, staleContinuation: 'detected', indexRecovery: 'rebuildable', workerIsolation: true });
+        return ok({ reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, staleContinuation: 'not-evaluated', indexRecovery: 'rebuildable', workerIsolation: true });
       case 'tool_schema_list':
         return ok({ schemas: this.listToolSchemas(), persistence: this.stateStore === undefined ? 'memory_only' : 'session_locked_state' });
       case 'tool_schema_register':

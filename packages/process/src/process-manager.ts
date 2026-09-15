@@ -24,6 +24,7 @@ interface ManagedRecord {
   finishedAt?: string;
   exitCode?: number;
   errorMessage?: string;
+  stdinError?: string;
   timer?: ReturnType<typeof setTimeout>;
   stopRequested?: 'stopped' | 'timed_out';
   terminationAttempt?: Promise<boolean>;
@@ -67,6 +68,7 @@ export class ProcessManager {
       shell: false,
       detached: process.platform !== 'win32',
       windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
       ...(invocation.value.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.value.windowsVerbatimArguments }),
     });
     const record: ManagedRecord = {
@@ -82,7 +84,11 @@ export class ProcessManager {
     child.stdout?.on('data', (chunk: Buffer) => record.logs.append('stdout', chunk.toString('utf8')));
     child.stderr?.on('data', (chunk: Buffer) => record.logs.append('stderr', chunk.toString('utf8')));
     child.once('error', (error: Error & { code?: string }) => this.handleError(record, error));
+    child.stdin?.once('error', (error: Error & { code?: string }) => this.handleStdinError(record, error));
     child.once('close', (exitCode: number | null) => this.handleClose(record, exitCode));
+    // Managed tasks are non-interactive. Write the complete bounded payload, when present,
+    // then close stdin immediately so CLIs that wait for EOF cannot hang the task lifecycle.
+    child.stdin?.end(spec.stdinText);
 
     return new Promise((resolve) => {
       let settled = false;
@@ -182,6 +188,9 @@ export class ProcessManager {
     if (typeof spec.cwd !== 'string' || !path.isAbsolute(spec.cwd)) {
       return err(appError('INVALID_INPUT', 'Process cwd must be an absolute path'));
     }
+    if (spec.stdinText !== undefined && typeof spec.stdinText !== 'string') {
+      return err(appError('INVALID_INPUT', 'Process stdinText must be a string when provided'));
+    }
     const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
       return err(appError('INVALID_INPUT', 'Process timeout is invalid'));
@@ -194,8 +203,25 @@ export class ProcessManager {
     if (error.code !== 'ENOENT') record.exitCode = -1;
   }
 
+  private handleStdinError(record: ManagedRecord, error: Error & { code?: string }): void {
+    // Closing an unused stdin can race with a short-lived child. The listener still contains
+    // that pipe error, but only a failed payload write changes the managed task outcome.
+    if (record.spec.stdinText === undefined) return;
+    const message = `Process stdin write failed${error.code === undefined ? '' : ` (${error.code})`}`;
+    record.stdinError = message;
+    // The child close event and stdin error can arrive in either order on Windows.
+    if (record.stopRequested === undefined && record.state === 'exited') {
+      record.state = 'failed';
+      record.errorMessage = message;
+    }
+  }
+
   private handleClose(record: ManagedRecord, exitCode: number | null): void {
-    if (record.stopRequested === undefined && !isTerminal(record.state)) this.finish(record, 'exited');
+    if (record.stopRequested === undefined && !isTerminal(record.state)) {
+      const stdinError = record.stdinError;
+      this.finish(record, stdinError === undefined ? 'exited' : 'failed');
+      if (stdinError !== undefined) record.errorMessage = stdinError;
+    }
     if (record.exitCode === undefined && exitCode !== null) record.exitCode = exitCode;
   }
 
