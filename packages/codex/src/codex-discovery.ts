@@ -114,7 +114,12 @@ export class CodexDiscovery {
     const helpResult = await this.runner.run(resolved.value, ['--help']);
     if (helpResult.exitCode !== 0) return commandFailure(resolved.value, '--help', helpResult, this.platform);
     const helpText = `${helpResult.stdout}\n${helpResult.stderr}`;
-    const capabilities = capabilitiesFromHelp(helpText);
+    const preliminary = capabilitiesFromHelp(helpText);
+    const execHelpResult = preliminary.names.includes('exec')
+      ? await this.runner.run(resolved.value, ['exec', '--help'])
+      : undefined;
+    const execHelpText = execHelpResult?.exitCode === 0 ? `${execHelpResult.stdout}\n${execHelpResult.stderr}` : '';
+    const capabilities = capabilitiesFromHelp(`${helpText}\n${execHelpText}`);
     const statusCapabilities = ['version', 'help', ...capabilities.names];
     const version = parseVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
     return ok({

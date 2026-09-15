@@ -22,6 +22,7 @@ export interface CodexDiscoveryResult {
 export interface CodexInvocation {
   readonly executable: string;
   readonly args: readonly string[];
+  readonly stdinText?: string;
 }
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write';
@@ -38,11 +39,14 @@ export class CodexInvocationBuilder {
       return err(appError('CODEX_NOT_AVAILABLE', `Codex ${sandboxMode} sandbox support was not verified`, true));
     }
     const sandboxArgs = ['--sandbox', sandboxMode];
-    const args = capabilities.instructionMode === 'exec-argument'
-      ? ['exec', ...sandboxArgs, instruction]
-      : capabilities.instructionMode === 'prompt-option'
-        ? [...sandboxArgs, '--prompt', instruction]
-        : [...sandboxArgs, instruction];
+    if (capabilities.instructionMode === 'exec-argument') {
+      return capabilities.names.includes('stdin-prompt')
+        ? ok({ executable, args: ['exec', ...sandboxArgs, '-'], stdinText: instruction })
+        : ok({ executable, args: ['exec', ...sandboxArgs, instruction] });
+    }
+    const args = capabilities.instructionMode === 'prompt-option'
+      ? [...sandboxArgs, '--prompt', instruction]
+      : [...sandboxArgs, instruction];
     return ok({ executable, args });
   }
 }
@@ -55,6 +59,7 @@ export function capabilitiesFromHelp(helpText: string): CodexCapabilities {
   if (/--sandbox\b/i.test(helpText)) names.push('sandbox');
   if (/\bread-only\b/i.test(helpText)) names.push('read-only');
   if (/\bworkspace-write\b/i.test(helpText)) names.push('workspace-write');
+  if (/instructions?\s+(?:are\s+)?read\s+from\s+stdin|read\s+(?:the\s+)?(?:initial\s+)?instructions?\s+from\s+stdin/i.test(helpText)) names.push('stdin-prompt');
   const instructionMode = names.includes('exec')
     ? 'exec-argument'
     : names.includes('prompt-argument')

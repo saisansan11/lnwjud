@@ -56,6 +56,15 @@ One user request owns one durable goal and at most one live Native ChatGPT watch
 - Yield only when the goal is terminal, a real external blocker/user decision leaves no safe useful work, the host forces the turn boundary, or a genuinely long blocking job has no useful parallel work left and durable continuation coverage is confirmed.
 - Do not promise or target a fixed 22/25-minute runtime. Consume as much useful host turn as is available while respecting the stop conditions above.
 
+## Tool-round efficiency
+
+- Treat host tool-call capacity as scarce transport, not as the unit of work. The durable goal owns the outcome even when one host turn cannot carry every observation.
+- When a write-capable owned agent or background runner is available, send one coherent implementation unit with explicit acceptance criteria instead of decomposing it into many tiny commands that each need a separate tool round.
+- After delegated or background work finishes, batch-inspect the changed diff, relevant tests, logs, and terminal result before deciding what to do next. Request one targeted repair for verified gaps, then batch-verify again.
+- Prefer `wait`/`result` or one bounded status-and-log observation at meaningful state changes. Do not poll status, logs, and result repeatedly when no state change is expected.
+- If delegation is unavailable or unsafe for the mutation, continue directly under the current goal lease but keep the same batching discipline for reads, tests, and verification.
+- Delegation is execution, not acceptance evidence. Never report completion from an agent summary alone; inspect the resulting workspace state and required verification yourself.
+
 ## Authoritative CI watcher policy
 
 When work includes waiting for GitHub Actions, the CI watcher is part of the active worker's durable work, not a reason to yield to the next scheduled tick.

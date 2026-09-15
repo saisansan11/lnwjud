@@ -35,6 +35,59 @@ describe('ProcessManager', () => {
     ]));
   });
 
+  it('writes stdin text and closes stdin so EOF-driven CLIs can finish', async () => {
+    const manager = new ProcessManager();
+    const payload = 'literal > & | ^ % ! " text';
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', "let input=''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => process.stdout.write(input));"],
+      cwd: process.cwd(),
+      stdinText: payload,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await waitForState(manager, started.value.processId, 'exited');
+    const logs = manager.logs(started.value.processId, {});
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) return;
+    expect(logs.value.entries.map((entry) => entry.text).join('')).toContain(payload);
+  });
+
+  it('closes stdin even when no input payload is provided', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('eof'));"],
+      cwd: process.cwd(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await waitForState(manager, started.value.processId, 'exited');
+    const logs = manager.logs(started.value.processId, {});
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) return;
+    expect(logs.value.entries.map((entry) => entry.text).join('')).toContain('eof');
+  });
+
+  it('contains stdin write errors when a child exits before a payload is delivered', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'process.exit(0)'],
+      cwd: process.cwd(),
+      stdinText: 'x'.repeat(256 * 1024),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await waitForState(manager, started.value.processId, 'failed');
+    expect(manager.status(started.value.processId)).toMatchObject({
+      ok: true,
+      value: { state: 'failed', error: expect.stringContaining('stdin write failed') },
+    });
+  });
+
   it('times out a running child and stops only an owned process handle', async () => {
     const manager = new ProcessManager();
     const started = await manager.start({

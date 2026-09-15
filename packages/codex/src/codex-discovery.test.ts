@@ -6,15 +6,21 @@ import { err, ok, type Result } from '@lnwjud/domain';
 import { CodexDiscovery, DirectCodexCommandRunner, formatCodexDiscoveryError, PathCodexExecutableResolver, type CodexCommandResult, type CodexCommandRunner, type CodexExecutableResolver } from './codex-discovery.js';
 
 describe('CodexDiscovery', () => {
-  it('discovers version and supported instruction capabilities without reading credentials', async () => {
+  it('discovers version and verified stdin instruction support without reading credentials', async () => {
     const calls: { executable: string; args: readonly string[] }[] = [];
     const resolver: CodexExecutableResolver = { async resolve(): Promise<Result<string>> { return ok('C:\\tools\\codex.exe'); } };
     const runner: CodexCommandRunner = {
       async run(executable, args): Promise<CodexCommandResult> {
         calls.push({ executable, args });
-        return args[0] === '--version'
-          ? { exitCode: 0, stdout: 'codex 0.42.1\\n', stderr: '' }
-          : { exitCode: 0, stdout: 'Usage: codex [OPTIONS]\\nCommands:\\n  exec  run a task\\nOptions:\\n  --prompt <TEXT>\\n', stderr: '' };
+        if (args[0] === '--version') return { exitCode: 0, stdout: 'codex 0.42.1\n', stderr: '' };
+        if (args[0] === '--help') {
+          return { exitCode: 0, stdout: 'Usage: codex [OPTIONS]\nCommands:\n  exec  run a task\nOptions:\n  --sandbox <MODE> [possible values: read-only, workspace-write]\n', stderr: '' };
+        }
+        return {
+          exitCode: 0,
+          stdout: 'Usage: codex exec [OPTIONS] [PROMPT]\nArguments:\n  [PROMPT] Initial instructions for the agent. If `-` is used, instructions are read from stdin.\nOptions:\n  --sandbox <MODE> [possible values: read-only, workspace-write]\n',
+          stderr: '',
+        };
       },
     };
 
@@ -24,12 +30,37 @@ describe('CodexDiscovery', () => {
       installed: true,
       executablePath: 'C:\\tools\\codex.exe',
       version: '0.42.1',
+      capabilities: expect.arrayContaining(['exec', 'sandbox', 'workspace-write', 'stdin-prompt']),
     } } });
-    if (result.ok) expect(result.value.capabilities.instructionMode).toBe('exec-argument');
+    if (result.ok) {
+      expect(result.value.capabilities.instructionMode).toBe('exec-argument');
+      expect(result.value.capabilities.names).toContain('stdin-prompt');
+    }
     expect(calls).toEqual([
       { executable: 'C:\\tools\\codex.exe', args: ['--version'] },
       { executable: 'C:\\tools\\codex.exe', args: ['--help'] },
+      { executable: 'C:\\tools\\codex.exe', args: ['exec', '--help'] },
     ]);
+  });
+
+  it('keeps exec support but does not claim stdin prompt support when exec help is unavailable', async () => {
+    const resolver: CodexExecutableResolver = { async resolve(): Promise<Result<string>> { return ok('C:\\tools\\codex.exe'); } };
+    const runner: CodexCommandRunner = {
+      async run(_executable, args): Promise<CodexCommandResult> {
+        if (args[0] === '--version') return { exitCode: 0, stdout: 'codex 0.41.0\n', stderr: '' };
+        if (args[0] === '--help') {
+          return { exitCode: 0, stdout: 'Usage: codex [OPTIONS]\nCommands:\n  exec  run a task\nOptions:\n  --sandbox <MODE> [possible values: read-only, workspace-write]\n', stderr: '' };
+        }
+        return { exitCode: 2, stdout: '', stderr: 'unknown option --help' };
+      },
+    };
+
+    const result = await new CodexDiscovery(resolver, runner).discover();
+
+    expect(result).toMatchObject({ ok: true, value: { status: { installed: true } } });
+    if (!result.ok) return;
+    expect(result.value.capabilities.instructionMode).toBe('exec-argument');
+    expect(result.value.capabilities.names).not.toContain('stdin-prompt');
   });
 
   it('reports not installed without attempting any command or credential lookup', async () => {
@@ -77,7 +108,7 @@ describe('CodexDiscovery', () => {
     });
   });
 
-  it('reports the help discovery stage when help invocation cannot start', async () => {
+  it('reports the help discovery stage when top-level help invocation cannot start', async () => {
     const resolver: CodexExecutableResolver = { async resolve(): Promise<Result<string>> { return ok(path.join(os.homedir(), 'tools', 'codex.exe')); } };
     let invocation = 0;
     const runner: CodexCommandRunner = {

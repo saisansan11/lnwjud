@@ -56,6 +56,11 @@ describe('scheduled continuation skill contract', () => {
     expect(skill).toContain('Never deliberately wait for lease expiry as a continuation strategy');
     expect(skill).toContain('Yield only when the goal is terminal');
     expect(skill).toContain('Do not promise or target a fixed 22/25-minute runtime');
+    expect(skill).toContain('Tool-round efficiency');
+    expect(skill).toContain('one coherent implementation unit with explicit acceptance criteria');
+    expect(skill).toContain('batch-inspect the changed diff, relevant tests, logs, and terminal result');
+    expect(skill).toContain('Do not poll status, logs, and result repeatedly');
+    expect(skill).toContain('Delegation is execution, not acceptance evidence');
     expect(skill).toContain('two-probe');
     expect(skill).toContain('Full Bypass never bypasses durable-goal ownership fences');
     expect(skill).toContain('not persistent user or agent instructions');
